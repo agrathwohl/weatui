@@ -1,0 +1,15 @@
+[package]
+name = "weatui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+chrono = "0.4.45"
+nexrad = { version = "1.0.0-rc.4", default-features = false, features = ["aws-polling", "decode", "model", "chrono"] }
+ratatui = "0.30.2"
+reqwest = { version = "0.13.4", features = ["json", "gzip"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "time", "signal"] }
+toml = "1.1.3"
