@@ -18,7 +18,7 @@ and shows you the radar context behind it.
 | R2 | Explicitly **exclude** climate/air-quality/marine/heat/surf noise | user |
 | R3 | Radar visualization: previous / current / upcoming, scrubable — rewind, fast-forward, pause | user |
 | R4 | Keyboard only. No mouse in v1. **Vim keys** for radar pan and timeline | user |
-| R5 | YAML config at `~/.config/weatui/config.yaml` | user |
+| R5 | Simple config file at `~/.config/weatui/config.toml` | user (YAML was an example, not a requirement — see §2.7) |
 | R6 | Integrate with the user's actual notification system | user ("find out") |
 | R7 | `weatui` = TUI; `weatui -d` = headless daemon, alerts only | user |
 | R8 | USA-focused, US-gov data sources, ZIP-code addressable | user |
@@ -165,6 +165,39 @@ Maintained Rust crates exist (crates.io, updated 2026). **Do not write a Level I
 Prior art: `rustywx` 0.8.0 — "NEXRAD Level II weather radar scope with alerts". Worth reading before
 writing; not a dependency.
 
+### 2.7 Resolved dependency graph (Phase 0 — DONE, commit `b6083aa`)
+
+Resolved empirically, not assumed. `nix develop -c cargo build` succeeds.
+
+| Crate | Version | Notes |
+|---|---|---|
+| `nexrad` | `1.0.0-rc.4` | `default-features = false`, features `aws-polling, decode, model, chrono` |
+| `ratatui` | `0.30.2` | bundles `ratatui-crossterm` — no separate crossterm dep needed |
+| `reqwest` | `0.13.4` | features `json, gzip`; defaults already supply rustls |
+| `tokio` | `1.53.1` | `rt-multi-thread, macros, time, signal` |
+| `toml` | `1.1.3` | replaces YAML |
+| `serde` / `serde_json` | `1.0.229` / `1.0.151` | CAP parsing + config |
+| `chrono` | `0.4.45` | alert timestamps |
+| `anyhow` | `1.0.104` | error handling |
+
+Toolchain: rustc/cargo **1.97.0** from nixpkgs-unstable. Edition **2024**.
+
+**Four findings that would have caused failures later:**
+
+1. **`nexrad` 1.0 is pre-release only.** A bare `cargo add nexrad` silently resolves to **v0.0.3** — an
+   entirely different API — because cargo will not select a pre-release without an explicit pin.
+   Must be `nexrad@1.0.0-rc.4`.
+2. **`nexrad`'s `aws-polling` feature** (`= [aws, nexrad-data?/aws-polling, tokio, dep:futures]`) wires
+   realtime Level II chunk ingest directly. The three sub-crates need not be assembled by hand.
+   Supersedes §2.6's sub-crate table.
+3. **`reqwest` 0.13 renamed its TLS features** and made rustls the default: `default-tls = [rustls]`.
+   There is no `rustls-tls` feature; passing it is a hard error.
+4. **No `openssl-sys` in the graph** (`cargo tree -i openssl-sys` → no match). `openssl` and
+   `pkg-config` were therefore removed from the dev shell rather than cargo-culted in.
+
+**Deliberately NOT added:** `clap` — the CLI surface is a single `-d` flag, which `std::env::args`
+handles. `crossterm` — ratatui re-exports it.
+
 ---
 
 ## 3. Architecture
@@ -175,7 +208,7 @@ weatui/
   Cargo.toml
   src/
     main.rs                  # arg parse: weatui | weatui -d
-    config.rs                # ~/.config/weatui/config.yaml (serde_yaml)
+    config.rs                # ~/.config/weatui/config.toml (serde + toml)
     geo.rs                   # ZIP -> lat/lon, nearest WSR-88D site selection
     alert/
       poll.rs                # api.weather.gov, ETag conditional GET, 5s tick
@@ -228,32 +261,34 @@ Unambiguous, modeless, vim-flavored.
 Rationale: `h/j/k/l` is spatial pan; timeline gets bracket-step + `gg`/`G` so no key means two
 things depending on invisible focus state. No modal focus switching in v1.
 
-### 3.2 Config sketch
+### 3.2 Config sketch — `~/.config/weatui/config.toml`
 
-```yaml
-location:
-  zip: "73019"            # REQUIRED — user must supply
-  # or: { lat: 35.2226, lon: -97.4395 }
+```toml
+[location]
+zip = "73019"             # REQUIRED — user must supply
+# lat/lon may be given instead of zip
 
-alerts:
-  poll_interval_secs: 5
-  tiers:
-    lethal:  [TO.W, EW.W, FF.W]
-    severe:  [SV.W, SQ.W, DS.W]
-    watch:   [TO.A, SV.A]
-  extra_events: ["Special Weather Statement"]   # non-VTEC allowlist
-  notify:
-    lethal: critical
-    severe: critical
-    watch:  normal
+[alerts]
+poll_interval_secs = 5
+extra_events = ["Special Weather Statement"]   # non-VTEC allowlist
 
-radar:
-  site: auto              # or explicit, e.g. KTLX
-  frames: 12
-  refresh_secs: 60
+[alerts.tiers]
+lethal = ["TO.W", "EW.W", "FF.W"]
+severe = ["SV.W", "SQ.W", "DS.W"]
+watch  = ["TO.A", "SV.A"]
 
-render:
-  colormap: threat        # threat | nws | mono
+[alerts.notify]
+lethal = "critical"
+severe = "critical"
+watch  = "normal"
+
+[radar]
+site = "auto"             # or explicit, e.g. "KTLX"
+frames = 12
+refresh_secs = 60
+
+[render]
+colormap = "threat"       # threat | nws | mono
 ```
 
 ---
@@ -284,9 +319,12 @@ Non-goals for v1: mouse, non-US sources, historical archive browsing, multi-loca
 
 ## 5. Implementation Steps
 
-**Phase 0 — Toolchain (blocking)**
-1. `flake.nix` pinning rust ≥ 1.80 + `pkg-config`, `openssl`. System rustc 1.69 cannot build the dependency set.
-2. `Cargo.toml`: `ratatui`, `crossterm`, `tokio`, `reqwest`(rustls), `serde`/`serde_yaml`, `nexrad-data`, `nexrad-decode`, `nexrad-model`.
+**Phase 0 — Toolchain — ✅ DONE (commit `b6083aa`)**
+1. ~~`flake.nix`~~ — done. Pins nixpkgs-unstable (rustc 1.97.0). No openssl/pkg-config: nothing needs them.
+2. ~~`Cargo.toml`~~ — done. See §2.7 for resolved versions and the four findings.
+
+> Every cargo invocation MUST go through the flake: `nix develop -c cargo <cmd>`.
+> System rustc is 1.69.0 and fails with confusing errors.
 
 **Phase 1 — Alert core (the product; ship-blocking)**
 3. `config.rs` — load/validate YAML, actionable errors (A14).
