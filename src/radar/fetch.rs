@@ -1,0 +1,150 @@
+//! The only module that names nexrad types.
+//!
+//! Level II is polar volume data. Rather than resample it ourselves, we keep
+//! the sweep in its native geometry and let `SweepField::value_at_polar`
+//! answer per-pixel queries, which preserves full resolution under zoom.
+
+use crate::geo::Coords;
+use crate::radar::ReflectivityField;
+use anyhow::{Context, Result, anyhow};
+use nexrad::data::aws::realtime::{
+    Chunk, assemble_volume, download_chunk, get_latest_volume, list_chunks_in_volume,
+};
+use nexrad::model::data::{GateStatus, Product, Scan, SweepField};
+use nexrad::model::geo::{GeoPoint, RadarCoordinateSystem};
+
+const MAX_CHUNKS_PER_VOLUME: usize = 100;
+
+pub struct NexradField {
+    site_id: String,
+    site_coords: Coords,
+    system: RadarCoordinateSystem,
+    field: SweepField,
+    max_range_km: f64,
+}
+
+impl NexradField {
+    /// Base reflectivity is the lowest tilt that actually carries a
+    /// reflectivity moment; higher tilts overshoot low-level storm structure.
+    pub fn from_scan(scan: &Scan) -> Result<Self> {
+        let site = scan
+            .site()
+            .context("scan carries no site metadata, cannot georeference it")?;
+
+        let sweep = scan
+            .sweeps()
+            .iter()
+            .filter(|s| s.radials().iter().any(|r| r.reflectivity().is_some()))
+            .min_by(|a, b| {
+                a.elevation_angle_degrees()
+                    .unwrap_or(f32::MAX)
+                    .total_cmp(&b.elevation_angle_degrees().unwrap_or(f32::MAX))
+            })
+            .context("scan contains no sweep with reflectivity data")?;
+
+        let field = SweepField::from_radials(sweep.radials(), Product::Reflectivity)
+            .ok_or_else(|| anyhow!("could not build a reflectivity field from the sweep"))?;
+
+        Ok(NexradField {
+            site_id: site.identifier_string(),
+            site_coords: Coords {
+                lat: site.latitude() as f64,
+                lon: site.longitude() as f64,
+            },
+            system: RadarCoordinateSystem::new(site),
+            max_range_km: field.max_range_km(),
+            field,
+        })
+    }
+}
+
+impl ReflectivityField for NexradField {
+    fn dbz_at(&self, at: Coords) -> Option<f32> {
+        let polar = self.system.geo_to_polar(
+            GeoPoint { latitude: at.lat, longitude: at.lon },
+            self.field.elevation_degrees(),
+        );
+        let (value, status) = self
+            .field
+            .value_at_polar(polar.azimuth_degrees, polar.range_km)?;
+        matches!(status, GateStatus::Valid).then_some(value)
+    }
+
+    fn site_id(&self) -> &str {
+        &self.site_id
+    }
+
+    fn site_coords(&self) -> Coords {
+        self.site_coords
+    }
+
+    fn max_range_km(&self) -> f64 {
+        self.max_range_km
+    }
+
+    fn elevation_degrees(&self) -> f32 {
+        self.field.elevation_degrees()
+    }
+}
+
+/// Assemble the in-progress volume from the realtime chunk bucket. A volume is
+/// built up chunk by chunk during the scan, so the newest one is usually partial.
+pub async fn latest_scan(site: &str) -> Result<Scan> {
+    let latest = get_latest_volume(site)
+        .await
+        .map_err(|e| anyhow!("failed to find the current volume for {site}: {e}"))?;
+
+    let volume = latest
+        .volume
+        .with_context(|| format!("no realtime volume is currently published for {site}"))?;
+
+    let ids = list_chunks_in_volume(site, volume, MAX_CHUNKS_PER_VOLUME)
+        .await
+        .map_err(|e| anyhow!("failed to list chunks for {site}: {e}"))?;
+
+    if ids.is_empty() {
+        anyhow::bail!("volume for {site} contains no chunks yet");
+    }
+
+    let mut chunks: Vec<Chunk> = Vec::with_capacity(ids.len());
+    for id in &ids {
+        let (_, chunk) = download_chunk(site, id)
+            .await
+            .map_err(|e| anyhow!("failed to download a chunk for {site}: {e}"))?;
+        chunks.push(chunk);
+    }
+
+    assemble_volume(chunks).map_err(|e| anyhow!("failed to assemble the volume for {site}: {e}"))
+}
+
+pub async fn latest_field(site: &str) -> Result<NexradField> {
+    NexradField::from_scan(&latest_scan(site).await?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::radar::grid::{Viewport, rasterize};
+
+    /// Hits the live NOAA S3 bucket, so it is excluded from the default run.
+    /// `cargo test -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn live_volume_resamples_into_a_populated_grid() {
+        let field = latest_field("KTLX").await.expect("fetch KTLX");
+        assert_eq!(field.site_id().trim(), "KTLX");
+        assert!(field.max_range_km() > 100.0, "range {}", field.max_range_km());
+
+        let grid = rasterize(&field, &Viewport::new(field.site_coords(), 400.0, 200, 100));
+        eprintln!(
+            "site {} elev {:.2} deg range {:.0} km -> {}/{} pixels populated, dbz {:?}",
+            field.site_id(),
+            field.elevation_degrees(),
+            field.max_range_km(),
+            grid.populated_cells(),
+            grid.width * grid.height,
+            grid.value_range()
+        );
+        assert!(grid.populated_cells() > 0, "resampled grid was entirely empty");
+    }
+}

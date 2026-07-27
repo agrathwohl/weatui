@@ -3,6 +3,7 @@ mod config;
 mod daemon;
 mod geo;
 mod notify;
+mod radar;
 
 use anyhow::Result;
 
