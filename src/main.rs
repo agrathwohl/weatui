@@ -4,6 +4,7 @@ mod daemon;
 mod geo;
 mod notify;
 mod radar;
+mod render;
 
 use anyhow::Result;
 
