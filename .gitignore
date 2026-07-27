@@ -1,0 +1,11 @@
+# Rust build output
+/target
+
+# Nix build symlinks
+result
+result-*
+.direnv/
+
+# Agent tooling state (plans under .omc/plans/ are tracked deliberately)
+.omc/state/
+.remember/
