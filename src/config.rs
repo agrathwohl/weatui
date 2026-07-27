@@ -26,6 +26,9 @@ pub fn cache_dir() -> Result<PathBuf> {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
+    /// Defaulted so an omitted section reaches `validate` and gets the
+    /// actionable message, rather than serde's bare "missing field".
+    #[serde(default)]
     pub location: Location,
     #[serde(default)]
     pub alerts: Alerts,
@@ -35,7 +38,7 @@ pub struct Config {
     pub render: Render,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct Location {
     pub zip: Option<String>,
     pub lat: Option<f64>,
@@ -306,6 +309,21 @@ mod tests {
             .unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("/home/x/config.toml"), "got: {msg}");
+        assert!(msg.contains("zip"), "error should show a usable stanza: {msg}");
+    }
+
+    #[test]
+    fn a14_empty_location_section_also_gets_the_actionable_message() {
+        let err = Config::parse("[location]\n", "/home/x/config.toml").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("/home/x/config.toml"), "got: {msg}");
+        assert!(msg.contains("lat"), "got: {msg}");
+    }
+
+    #[test]
+    fn a14_entirely_empty_config_is_actionable_rather_than_a_serde_error() {
+        let err = Config::parse("", "/home/x/config.toml").unwrap_err();
+        assert!(format!("{err:#}").contains("zip"));
     }
 
     #[test]
