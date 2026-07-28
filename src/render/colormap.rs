@@ -14,6 +14,7 @@ pub const NO_DATA: Rgb = (0, 0, 0);
 /// The faintest echo must read clearly against the black background, because
 /// ordinary weather lives entirely below 35 dBZ and a ramp that starts near
 /// black renders most days as an empty screen.
+#[cfg(test)]
 const MIN_ECHO_LUMINANCE: f32 = 55.0;
 
 const THREAT_STOPS: &[(f32, Rgb)] = &[
@@ -73,14 +74,10 @@ fn sample(stops: &[(f32, Rgb)], dbz: f32) -> Option<Rgb> {
     stops.last().map(|s| s.1)
 }
 
-fn mono(dbz: f32) -> Option<Rgb> {
-    if dbz < 5.0 {
-        return None;
-    }
-    let t = ((dbz - 5.0) / 65.0).clamp(0.0, 1.0);
-    let v = (24.0 + t * 231.0).round() as u8;
-    Some((v, v, v))
-}
+/// Starts well above black for the same reason the threat ramp does. Mono is
+/// the fallback for greyscale and colour-blind use, so it needs the visibility
+/// floor most, not least.
+const MONO_STOPS: &[(f32, Rgb)] = &[(5.0, (62, 62, 62)), (70.0, (255, 255, 255))];
 
 /// `None` means "no echo here", which is rendered as background rather than as
 /// a dark colour, so empty sky and weak returns stay distinguishable.
@@ -88,7 +85,7 @@ pub fn dbz_to_rgb(dbz: f32, map: Colormap) -> Option<Rgb> {
     match map {
         Colormap::Threat => sample(THREAT_STOPS, dbz),
         Colormap::Nws => sample(NWS_STOPS, dbz),
-        Colormap::Mono => mono(dbz),
+        Colormap::Mono => sample(MONO_STOPS, dbz),
     }
 }
 
@@ -162,13 +159,23 @@ mod tests {
     /// as a blank screen.
     #[test]
     fn the_faintest_echo_is_clearly_brighter_than_empty_sky() {
-        let faintest = dbz_to_rgb(5.0, Colormap::Threat).unwrap();
-        let l = luminance(faintest);
-        assert!(
-            l >= MIN_ECHO_LUMINANCE,
-            "5 dBZ luminance {l} is too close to the {} background",
-            luminance(NO_DATA)
-        );
+        for map in [Colormap::Threat, Colormap::Mono] {
+            let l = luminance(dbz_to_rgb(5.0, map).unwrap());
+            assert!(
+                l >= MIN_ECHO_LUMINANCE,
+                "{map:?} 5 dBZ luminance {l} is too close to the {} background",
+                luminance(NO_DATA)
+            );
+        }
+    }
+
+    /// Nws reproduces the published NWS scale, whose whole value is matching
+    /// what people already recognise, so it is deliberately exempt from the
+    /// visibility floor the other two obey.
+    #[test]
+    fn the_nws_map_is_left_authentic_rather_than_brightened() {
+        assert_eq!(dbz_to_rgb(5.0, Colormap::Nws), Some((4, 233, 231)));
+        assert_eq!(dbz_to_rgb(75.0, Colormap::Nws), Some((248, 0, 253)));
     }
 
     /// Every level in the range ordinary weather actually occupies must be
