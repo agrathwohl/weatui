@@ -11,18 +11,23 @@ pub type Rgb = (u8, u8, u8);
 
 pub const NO_DATA: Rgb = (0, 0, 0);
 
+/// The faintest echo must read clearly against the black background, because
+/// ordinary weather lives entirely below 35 dBZ and a ramp that starts near
+/// black renders most days as an empty screen.
+const MIN_ECHO_LUMINANCE: f32 = 55.0;
+
 const THREAT_STOPS: &[(f32, Rgb)] = &[
-    (5.0, (24, 32, 44)),
-    (15.0, (34, 62, 74)),
-    (25.0, (44, 96, 88)),
-    (35.0, (86, 140, 74)),
-    (40.0, (196, 190, 72)),
-    (45.0, (232, 148, 48)),
-    (50.0, (226, 58, 42)),
-    (55.0, (176, 24, 32)),
-    (60.0, (208, 46, 176)),
-    (65.0, (150, 84, 220)),
-    (70.0, (238, 238, 246)),
+    (5.0, (46, 88, 140)),
+    (15.0, (40, 140, 205)),
+    (25.0, (32, 196, 178)),
+    (35.0, (74, 222, 92)),
+    (40.0, (238, 232, 66)),
+    (45.0, (255, 170, 24)),
+    (50.0, (255, 60, 60)),
+    (55.0, (255, 80, 150)),
+    (60.0, (255, 70, 235)),
+    (65.0, (195, 130, 255)),
+    (70.0, (255, 255, 255)),
 ];
 
 const NWS_STOPS: &[(f32, Rgb)] = &[
@@ -151,21 +156,47 @@ mod tests {
         }
     }
 
-    /// The stated design is muted below 35 dBZ and loud above 50, so contrast
-    /// must be spent where the danger is rather than spread evenly.
+    /// Ordinary weather never leaves the bottom of the scale, so the faintest
+    /// echo has to be obviously brighter than empty sky. An earlier ramp put
+    /// 5 dBZ at luminance 31 against a black background and rendered most days
+    /// as a blank screen.
     #[test]
-    fn threat_ramp_spends_its_contrast_on_the_dangerous_end() {
-        let seps = step_separations();
-        let quiet: i32 = seps.iter().filter(|(d, _)| *d <= 35.0).map(|(_, s)| *s).sum();
-        let quiet_n = seps.iter().filter(|(d, _)| *d <= 35.0).count() as i32;
-        let loud: i32 = seps.iter().filter(|(d, _)| *d > 45.0).map(|(_, s)| *s).sum();
-        let loud_n = seps.iter().filter(|(d, _)| *d > 45.0).count() as i32;
-        let quiet_mean = quiet / quiet_n.max(1);
-        let loud_mean = loud / loud_n.max(1);
+    fn the_faintest_echo_is_clearly_brighter_than_empty_sky() {
+        let faintest = dbz_to_rgb(5.0, Colormap::Threat).unwrap();
+        let l = luminance(faintest);
         assert!(
-            loud_mean > quiet_mean * 2,
-            "contrast is not concentrated above 45 dBZ: quiet {quiet_mean} vs loud {loud_mean}"
+            l >= MIN_ECHO_LUMINANCE,
+            "5 dBZ luminance {l} is too close to the {} background",
+            luminance(NO_DATA)
         );
+    }
+
+    /// Every level in the range ordinary weather actually occupies must be
+    /// legible, not just technically distinct from its neighbour.
+    #[test]
+    fn the_sub_severe_range_stays_legible_throughout() {
+        for step in 0..7 {
+            let dbz = 5.0 + step as f32 * 5.0;
+            let l = luminance(dbz_to_rgb(dbz, Colormap::Threat).unwrap());
+            assert!(l >= MIN_ECHO_LUMINANCE, "{dbz} dBZ luminance {l} is too dark");
+        }
+    }
+
+    /// Brightening the weak end once pushed the severe reds below drizzle:
+    /// 55 dBZ sat at luminance 56 while 35 dBZ sat at 181, so hail cores read
+    /// as fainter than light rain. Nothing dangerous may be dimmer than the
+    /// faintest thing on the scale.
+    #[test]
+    fn no_severe_level_is_dimmer_than_the_faintest_echo() {
+        let floor = luminance(dbz_to_rgb(5.0, Colormap::Threat).unwrap());
+        for step in 9..=15 {
+            let dbz = step as f32 * 5.0;
+            let l = luminance(dbz_to_rgb(dbz, Colormap::Threat).unwrap());
+            assert!(
+                l >= floor,
+                "{dbz} dBZ luminance {l} is below the {floor} of the weakest echo"
+            );
+        }
     }
 
     /// Mono exists precisely for the grayscale and colour-blind case the hue
@@ -204,6 +235,37 @@ mod tests {
         let hi = dbz_to_rgb(40.0, Colormap::Threat).unwrap();
         let mid = dbz_to_rgb(37.5, Colormap::Threat).unwrap();
         assert!(mid.0 > lo.0 && mid.0 < hi.0, "{lo:?} {mid:?} {hi:?}");
+    }
+
+    /// Prints the ramps as truecolour half-blocks so they can be judged by eye.
+    /// `cargo test print_the_ramps -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn print_the_ramps() {
+        for (name, map) in [
+            ("threat", Colormap::Threat),
+            ("nws", Colormap::Nws),
+            ("mono", Colormap::Mono),
+        ] {
+            let mut bar = String::new();
+            for step in 0..=75 {
+                let dbz = step as f32;
+                let (r, g, b) = cell_rgb(Some(dbz), map);
+                bar.push_str(&format!("\x1b[38;2;{r};{g};{b}m\u{2588}"));
+            }
+            println!("{name:>7} \x1b[0m{bar}\x1b[0m");
+        }
+        println!("{:>7} {}", "dBZ", (0..=75).map(|d| {
+            if d % 10 == 0 { char::from_digit((d / 10) as u32, 10).unwrap() } else { ' ' }
+        }).collect::<String>());
+        println!("\n  luminance at each stop:");
+        for step in 0..=14 {
+            let dbz = step as f32 * 5.0;
+            match dbz_to_rgb(dbz, Colormap::Threat) {
+                Some(c) => println!("   {dbz:>4.0} dBZ  {c:>16?}  L={:.0}", luminance(c)),
+                None => println!("   {dbz:>4.0} dBZ  {:>16}  (no echo)", "-"),
+            }
+        }
     }
 
     #[test]
