@@ -5,6 +5,7 @@ mod geo;
 mod notify;
 mod radar;
 mod render;
+mod tui;
 
 use anyhow::Result;
 
@@ -65,7 +66,11 @@ async fn main() -> Result<()> {
 
     let cfg = config::Config::load()?;
     let home = resolve_home(&cfg)?;
-    daemon::run(cfg, home, mode == Mode::Interactive).await
+    if mode == Mode::Daemon {
+        daemon::run(cfg, home, false).await
+    } else {
+        tui::run(cfg, home).await
+    }
 }
 
 #[cfg(test)]

@@ -119,17 +119,16 @@ impl FrameRing {
 
     /// Advance during playback, wrapping to the oldest frame at the end so the
     /// loop repeats the way a radar loop is expected to.
+    ///
+    /// Playback is not scrubbing: `follow_live` tracks whether the cursor sits
+    /// on the newest frame, so a single-frame ring stays live rather than
+    /// reporting itself as historical after the first wrap.
     pub fn advance_playback(&mut self) {
         if !self.playing || self.frames.is_empty() {
             return;
         }
-        if self.cursor + 1 >= self.frames.len() {
-            self.cursor = 0;
-            self.follow_live = false;
-        } else {
-            self.cursor += 1;
-            self.follow_live = self.cursor == self.frames.len() - 1;
-        }
+        self.cursor = if self.cursor + 1 >= self.frames.len() { 0 } else { self.cursor + 1 };
+        self.follow_live = self.cursor + 1 == self.frames.len();
     }
 }
 
@@ -234,6 +233,33 @@ mod tests {
         r.jump_newest();
         assert!(r.is_following_live());
         assert_eq!(r.cursor(), 1);
+    }
+
+    #[test]
+    fn a_single_frame_ring_stays_live_across_playback_wraps() {
+        let mut r = FrameRing::new(4);
+        r.push(frame(0));
+        assert!(r.is_following_live());
+        for _ in 0..5 {
+            r.advance_playback();
+            assert!(r.is_following_live(), "one frame is always the newest frame");
+            assert_eq!(r.cursor(), 0);
+        }
+    }
+
+    #[test]
+    fn playback_reaching_the_newest_frame_reports_live_again() {
+        let mut r = FrameRing::new(4);
+        r.push(frame(0));
+        r.push(frame(1));
+        r.push(frame(2));
+        r.advance_playback();
+        assert_eq!(r.cursor(), 0);
+        assert!(!r.is_following_live());
+        r.advance_playback();
+        r.advance_playback();
+        assert_eq!(r.cursor(), 2);
+        assert!(r.is_following_live());
     }
 
     #[test]
