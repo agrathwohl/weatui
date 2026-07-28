@@ -15,7 +15,6 @@ pub mod glyph {
     pub const STORM_WARNING: char = '\u{e3c6}';
     pub const NO_DATA: char = '\u{e374}';
     pub const REFRESH: char = '\u{e348}';
-    pub const HOME: char = '\u{f041}';
     pub const PLAY: char = '\u{f04b}';
     pub const PAUSE: char = '\u{f04c}';
     pub const CLOCK: char = '\u{f017}';

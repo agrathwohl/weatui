@@ -39,6 +39,8 @@ pub struct Hud<'a> {
     pub stale: bool,
     pub stale_secs: u64,
     pub site: &'a str,
+    pub home: crate::geo::Coords,
+    pub peak_dbz: Option<f32>,
     pub eta_for: &'a dyn Fn(&crate::alert::Alert) -> Option<i64>,
 }
 
@@ -61,7 +63,10 @@ impl Hud<'_> {
         }
 
         lines.push(Line::from(Span::styled(
-            format!("{} {}", glyph::REFRESH, self.site),
+            match self.peak_dbz {
+                Some(peak) => format!("{} {}  peak {peak:.0} dBZ", glyph::REFRESH, self.site),
+                None => format!("{} {}", glyph::REFRESH, self.site),
+            },
             Style::default().fg(Color::Rgb(140, 140, 150)),
         )));
 
@@ -81,14 +86,35 @@ impl Hud<'_> {
             let style = Style::default()
                 .fg(tier_color(entry.tier))
                 .add_modifier(Modifier::BOLD);
+            let inside = entry.alert.contains(self.home.lat, self.home.lon);
             lines.push(Line::from(Span::styled(
-                format!("{g} {}", entry.alert.properties.event),
+                format!(
+                    "{g} {}{}",
+                    entry.alert.properties.event,
+                    if inside { "  [YOU]" } else { "" }
+                ),
                 style,
             )));
 
-            if let Some(minutes) = (self.eta_for)(&entry.alert) {
+            if let Some(detection) = entry.alert.tornado_detection() {
                 lines.push(Line::from(Span::styled(
-                    format!("  {} impact in {minutes} min", glyph::CLOCK),
+                    format!("  tornado {}", detection.to_lowercase()),
+                    Style::default()
+                        .fg(Color::Rgb(255, 255, 255))
+                        .bg(Color::Rgb(180, 0, 0))
+                        .add_modifier(Modifier::BOLD),
+                )));
+            }
+
+            if let Some(minutes) = (self.eta_for)(&entry.alert) {
+                let age = entry.alert.motion().map(|m| {
+                    (chrono::Utc::now() - m.observed_at.to_utc()).num_minutes().max(0)
+                });
+                lines.push(Line::from(Span::styled(
+                    match age {
+                        Some(a) => format!("  {} impact in {minutes} min (vector {a}m old)", glyph::CLOCK),
+                        None => format!("  {} impact in {minutes} min", glyph::CLOCK),
+                    },
                     Style::default().fg(tier_color(entry.tier)),
                 )));
             }
@@ -114,10 +140,34 @@ impl Hud<'_> {
                         .add_modifier(Modifier::BOLD),
                 )));
             }
+            let certainty = entry.alert.properties.certainty.as_deref().unwrap_or("unknown");
+            let until = entry
+                .alert
+                .properties
+                .expires
+                .as_deref()
+                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                .map(|t| t.format("%H:%M").to_string());
+            lines.push(Line::from(Span::styled(
+                match until {
+                    Some(t) => format!("  {} until {t}", certainty.to_lowercase()),
+                    None => format!("  {}", certainty.to_lowercase()),
+                },
+                Style::default().fg(Color::Rgb(200, 200, 210)),
+            )));
             if let Some(area) = &entry.alert.properties.area_desc {
                 lines.push(Line::from(Span::styled(
                     format!("  {area}"),
                     Style::default().fg(Color::Rgb(140, 140, 150)),
+                )));
+            }
+            if let Some(instruction) = &entry.alert.properties.instruction {
+                let action = instruction.split_whitespace().collect::<Vec<_>>().join(" ");
+                lines.push(Line::from(Span::styled(
+                    action,
+                    Style::default()
+                        .fg(Color::Rgb(255, 255, 255))
+                        .add_modifier(Modifier::BOLD),
                 )));
             }
         }
@@ -189,7 +239,7 @@ mod tests {
             let c = g as u32;
             assert!((0xe300..=0xe3e3).contains(&c), "{c:x} outside the weather range");
         }
-        for g in [glyph::HOME, glyph::PLAY, glyph::PAUSE, glyph::CLOCK] {
+        for g in [glyph::PLAY, glyph::PAUSE, glyph::CLOCK] {
             let c = g as u32;
             assert!((0xf000..=0xf381).contains(&c), "{c:x} outside the covered range");
         }
@@ -205,7 +255,7 @@ mod tests {
     fn quiet_hud_says_so_explicitly_rather_than_rendering_blank() {
         let active: Vec<ActiveAlert> = Vec::new();
         let eta = |_: &crate::alert::Alert| None;
-        let hud = Hud { active: &active, stale: false, stale_secs: 0, site: "KOHX", eta_for: &eta };
+        let hud = Hud { active: &active, stale: false, stale_secs: 0, site: "KOHX", home: crate::geo::Coords { lat: 36.0, lon: -87.0 }, peak_dbz: None, eta_for: &eta };
         let text: String = hud
             .lines()
             .iter()
@@ -218,7 +268,7 @@ mod tests {
     fn stale_feed_states_plainly_that_warnings_are_not_arriving() {
         let active: Vec<ActiveAlert> = Vec::new();
         let eta = |_: &crate::alert::Alert| None;
-        let hud = Hud { active: &active, stale: true, stale_secs: 420, site: "KOHX", eta_for: &eta };
+        let hud = Hud { active: &active, stale: true, stale_secs: 420, site: "KOHX", home: crate::geo::Coords { lat: 36.0, lon: -87.0 }, peak_dbz: None, eta_for: &eta };
         let text: String = hud
             .lines()
             .iter()
@@ -234,7 +284,7 @@ mod tests {
         let eta = |_: &crate::alert::Alert| None;
         let area = Rect::new(0, 0, 20, 5);
         let mut buf = Buffer::empty(area);
-        Hud { active: &active, stale: false, stale_secs: 0, site: "KOHX", eta_for: &eta }
+        Hud { active: &active, stale: false, stale_secs: 0, site: "KOHX", home: crate::geo::Coords { lat: 36.0, lon: -87.0 }, peak_dbz: None, eta_for: &eta }
             .render(area, &mut buf);
     }
 }

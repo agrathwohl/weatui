@@ -17,12 +17,6 @@ pub fn config_path() -> Result<PathBuf> {
     Ok(base.join("weatui").join("config.toml"))
 }
 
-pub fn cache_dir() -> Result<PathBuf> {
-    Ok(config_path()?
-        .parent()
-        .expect("config path always has a parent")
-        .to_path_buf())
-}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {

@@ -47,21 +47,31 @@ impl Viewport {
         }
     }
 
-    /// Inverse of [`pixel_coords`], for placing markers and polygon vertices.
-    /// Returns `None` when the position falls outside the viewport.
-    pub fn coords_to_pixel(&self, at: Coords) -> Option<(usize, usize)> {
+    /// Inverse of [`pixel_coords`] in continuous, unclipped pixel space.
+    ///
+    /// Deliberately not rounded: `pixel_coords` returns pixel centres, so a
+    /// round trip lands on `x + 0.5`. Callers that want a pixel index must
+    /// floor, while callers drawing vertices want nearest. Rounding here would
+    /// shift every round trip by one pixel.
+    pub fn project_unclipped(&self, at: Coords) -> (f64, f64) {
         let kpp = self.km_per_pixel();
         if kpp <= 0.0 {
-            return None;
+            return (f64::NEG_INFINITY, f64::NEG_INFINITY);
         }
         let dy_km = (at.lat - self.centre.lat) * KM_PER_DEG_LAT;
         let dx_km = (at.lon - self.centre.lon) * self.km_per_deg_lon();
-        let x = dx_km / kpp + self.width as f64 / 2.0;
-        let y = self.height as f64 / 2.0 - dy_km / kpp;
-        if x < 0.0 || y < 0.0 || x >= self.width as f64 || y >= self.height as f64 {
-            return None;
+        (
+            dx_km / kpp + self.width as f64 / 2.0,
+            self.height as f64 / 2.0 - dy_km / kpp,
+        )
+    }
+
+    pub fn project_to_nearest_pixel(&self, at: Coords) -> (i64, i64) {
+        let (x, y) = self.project_unclipped(at);
+        if !x.is_finite() || !y.is_finite() {
+            return (i64::MIN / 4, i64::MIN / 4);
         }
-        Some((x as usize, y as usize))
+        (x.floor() as i64, y.floor() as i64)
     }
 
     pub fn panned_km(&self, east_km: f64, north_km: f64) -> Viewport {
@@ -141,20 +151,33 @@ mod tests {
         );
     }
 
+    /// pixel_coords returns pixel centres, so projecting one back must land on
+    /// x + 0.5. Rounding here instead of flooring shifts every vertex by one.
     #[test]
-    fn coords_to_pixel_inverts_pixel_coords() {
+    fn projection_inverts_pixel_coords_at_the_half_pixel() {
         let v = viewport();
         for (x, y) in [(0, 0), (50, 25), (100, 50), (199, 99)] {
-            let round_tripped = v.coords_to_pixel(v.pixel_coords(x, y)).unwrap();
-            assert_eq!(round_tripped, (x, y), "failed for ({x},{y})");
+            let (px, py) = v.project_unclipped(v.pixel_coords(x, y));
+            assert!((px - (x as f64 + 0.5)).abs() < 1e-9, "x {x}: got {px}");
+            assert!((py - (y as f64 + 0.5)).abs() < 1e-9, "y {y}: got {py}");
+            assert_eq!(v.project_to_nearest_pixel(v.pixel_coords(x, y)), (x as i64, y as i64));
         }
     }
 
     #[test]
-    fn coords_outside_the_viewport_have_no_pixel() {
+    fn projection_of_a_point_outside_the_viewport_stays_signed_and_finite() {
         let v = viewport();
-        assert!(v.coords_to_pixel(Coords { lat: 60.0, lon: -97.4 }).is_none());
-        assert!(v.coords_to_pixel(Coords { lat: 35.2, lon: 0.0 }).is_none());
+        let (x, _) = v.project_unclipped(Coords { lat: NORMAN.lat, lon: NORMAN.lon - 5.0 });
+        assert!(x < 0.0, "a point far west must project to a negative x, got {x}");
+        assert!(x.is_finite());
+    }
+
+    #[test]
+    fn projection_of_a_degenerate_viewport_is_not_a_panic() {
+        let v = Viewport::new(NORMAN, 200.0, 0, 0);
+        let (x, y) = v.project_unclipped(NORMAN);
+        assert!(!x.is_finite() && !y.is_finite());
+        assert_eq!(v.project_to_nearest_pixel(NORMAN), (i64::MIN / 4, i64::MIN / 4));
     }
 
     #[test]

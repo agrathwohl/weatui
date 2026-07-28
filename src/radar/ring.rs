@@ -59,6 +59,19 @@ impl FrameRing {
         }
     }
 
+    /// Projections are always the newest entries. They must be discarded before
+    /// a fresh observation is appended, otherwise last cycle's extrapolation
+    /// would sit earlier in the track than data observed after it.
+    pub fn drop_projected(&mut self) {
+        while self.frames.back().is_some_and(|f| f.projected) {
+            self.frames.pop_back();
+        }
+        let last = self.frames.len().saturating_sub(1);
+        if self.cursor > last {
+            self.cursor = last;
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.frames.len()
     }

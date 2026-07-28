@@ -130,11 +130,10 @@ pub async fn run(cfg: Config, home: Coords, echo_to_stdout: bool) -> Result<()> 
             }
         }
 
-        if let Some(err) = &tick.poll_error {
-            if echo_to_stdout {
+        if let Some(err) = &tick.poll_error
+            && echo_to_stdout {
                 eprintln!("weatui: poll failed: {err}");
             }
-        }
 
         tokio::time::sleep(engine.next_delay()).await;
     }

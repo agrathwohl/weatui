@@ -7,10 +7,10 @@ use crate::geo::{Coords, RadarSite, nearest_radar_site, radar_site_by_id};
 use crate::notify;
 use crate::radar::grid::{Viewport, rasterize};
 use crate::radar::ring::{FrameRing, RadarFrame};
-use crate::radar::{ReflectivityField, fetch};
+use crate::radar::{AdvectedField, ReflectivityField, fetch};
 use crate::render::hud::Hud;
 use crate::render::overlay::{
-    HOME_MARKER, LETHAL_OUTLINE, PixelOverlay, SEVERE_OUTLINE, WATCH_OUTLINE,
+    HOME_MARKER, LETHAL_OUTLINE, PixelOverlay, RANGE_RING, SEVERE_OUTLINE, WATCH_OUTLINE,
 };
 use crate::render::raster::RadarRaster;
 use crate::render::timeline::Timeline;
@@ -30,6 +30,7 @@ const MIN_SPAN_KM: f64 = 20.0;
 const MAX_SPAN_KM: f64 = 900.0;
 const DEFAULT_SPAN_KM: f64 = 260.0;
 const HUD_WIDTH: u16 = 34;
+const PROJECTION_STEPS_MIN: &[f64] = &[10.0, 20.0, 30.0];
 
 const HELP: &str = "\
  MAP
@@ -154,7 +155,11 @@ impl App {
             playback: Duration::from_millis(450),
             show_help: false,
             quit: false,
-            status: format!("{} selected, waiting for first volume", site.id),
+            status: format!(
+                "{} selected, {:.0} km away, waiting for first volume",
+                site.id,
+                crate::geo::haversine_km(home, site.coords)
+            ),
         })
     }
 
@@ -193,6 +198,14 @@ impl App {
 
     fn build_overlay(&self, width: usize, height: usize) -> PixelOverlay {
         let mut overlay = PixelOverlay::new(width, height);
+        if let Some(frame) = self.ring.current() {
+            overlay.draw_range_ring(
+                frame.field.site_coords(),
+                frame.field.max_range_km(),
+                &self.viewport,
+                RANGE_RING,
+            );
+        }
         let mut ordered: Vec<_> = self.active.iter().collect();
         ordered.sort_by_key(|a| a.tier);
         for entry in ordered {
@@ -253,6 +266,8 @@ impl App {
                 stale: self.stale,
                 stale_secs: self.stale_secs,
                 site: self.site.id,
+                home: self.home,
+                peak_dbz: grid.value_range().map(|(_, hi)| hi),
                 eta_for: &eta,
             },
             columns[1],
@@ -274,6 +289,33 @@ impl App {
             );
         }
     }
+}
+
+/// Vector mean of the motions NWS published for the currently active warnings.
+/// Averaging headings numerically would be wrong across the 0/360 seam, so the
+/// components are averaged and the heading recovered with atan2.
+fn mean_storm_motion(active: &[crate::alert::state::ActiveAlert]) -> Option<(f64, f64)> {
+    let mut north = 0.0;
+    let mut east = 0.0;
+    let mut count = 0.0;
+    for entry in active {
+        if let Some(m) = entry.alert.motion() {
+            let theta = m.heading_deg().to_radians();
+            north += m.speed_kt * theta.cos();
+            east += m.speed_kt * theta.sin();
+            count += 1.0;
+        }
+    }
+    if count == 0.0 {
+        return None;
+    }
+    north /= count;
+    east /= count;
+    let speed = (north * north + east * east).sqrt();
+    if speed < 1.0 {
+        return None;
+    }
+    Some(((east.atan2(north).to_degrees() + 360.0) % 360.0, speed))
 }
 
 fn centred(width: u16, height: u16, area: Rect) -> Rect {
@@ -355,7 +397,7 @@ pub async fn run(cfg: Config, home: Coords) -> Result<()> {
     });
 
     let mut term = setup()?;
-    let outcome = event_loop(&mut app, &mut rx, &cfg, &mut term).await;
+    let outcome = event_loop(&mut app, &mut rx, &mut term).await;
     restore(&mut term)?;
     outcome
 }
@@ -363,7 +405,7 @@ pub async fn run(cfg: Config, home: Coords) -> Result<()> {
 async fn event_loop(
     app: &mut App,
     rx: &mut tokio::sync::mpsc::Receiver<Update>,
-    cfg: &Config,
+
     term: &mut Terminal<CrosstermBackend<Stdout>>,
 ) -> Result<()> {
     let mut last_advance = Instant::now();
@@ -371,14 +413,12 @@ async fn event_loop(
     loop {
         term.draw(|f| app.draw(f))?;
 
-        if event::poll(Duration::from_millis(40))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
+        if event::poll(Duration::from_millis(40))?
+            && let Event::Key(key) = event::read()?
+                && key.kind == KeyEventKind::Press {
                     let action = resolve_key(&mut app.pending, key);
                     app.apply(action);
                 }
-            }
-        }
 
         while let Ok(update) = rx.try_recv() {
             match update {
@@ -397,19 +437,42 @@ async fn event_loop(
                     };
                 }
                 Update::Radar(Ok(field)) => {
+                    app.ring.drop_projected();
+                    let observed_at = chrono::Utc::now();
+                    let observed: Arc<dyn ReflectivityField> = Arc::from(field);
+                    let tilt = observed.elevation_degrees();
                     app.ring.push(RadarFrame {
-                        captured_at: chrono::Utc::now(),
-                        field: Arc::from(field),
+                        captured_at: observed_at,
+                        field: observed.clone(),
                         projected: false,
                     });
+
+                    let projection = match mean_storm_motion(&app.active) {
+                        Some((heading, speed)) => {
+                            for minutes in PROJECTION_STEPS_MIN {
+                                app.ring.push(RadarFrame {
+                                    captured_at: observed_at
+                                        + chrono::Duration::minutes(*minutes as i64),
+                                    field: Arc::new(AdvectedField::new(
+                                        observed.clone(),
+                                        heading,
+                                        speed,
+                                        *minutes,
+                                    )),
+                                    projected: true,
+                                });
+                            }
+                            format!(" +{}min projected @ {heading:.0}deg {speed:.0}kt",
+                                PROJECTION_STEPS_MIN.last().copied().unwrap_or(0.0))
+                        }
+                        None => String::new(),
+                    };
+
                     app.status = format!(
-                        "{} volume {} frames, {:.1} deg tilt",
+                        "{} {:.1}deg tilt, {} frames{projection}",
                         app.site.id,
-                        app.ring.len(),
-                        app.ring
-                            .current()
-                            .map(|f| f.field.elevation_degrees())
-                            .unwrap_or(0.0)
+                        tilt,
+                        app.ring.len()
                     );
                 }
                 Update::Radar(Err(e)) => {

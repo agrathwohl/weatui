@@ -17,6 +17,7 @@ pub const UPPER_HALF_BLOCK: char = '\u{2580}';
 
 /// A10: terminal row `r` draws pixel rows `2r` (foreground) and `2r+1`
 /// (background) of column `c`.
+#[cfg(test)]
 pub fn cell_colors(grid: &DbzGrid, col: usize, row: usize, map: Colormap) -> (Rgb, Rgb) {
     cell_colors_with(grid, None, col, row, map)
 }

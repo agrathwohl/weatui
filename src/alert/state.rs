@@ -26,7 +26,10 @@ pub struct Notification {
 
 pub fn key_of(alert: &Alert) -> AlertKey {
     match alert.primary_vtec() {
-        Some(v) => format!("{}.{}.{}", v.office, v.phenomenon, v.etn),
+        Some(v) => {
+            let (office, phenomenon, etn) = v.event_key();
+            format!("{office}.{phenomenon}.{etn}")
+        }
         None => alert.properties.id.clone().unwrap_or_else(|| {
             format!(
                 "{}|{}",
@@ -94,14 +97,6 @@ impl AlertState {
         self.active.values()
     }
 
-    pub fn active_count(&self) -> usize {
-        self.active.len()
-    }
-
-    pub fn highest_tier(&self) -> Option<ThreatTier> {
-        self.active.values().map(|a| a.tier).max()
-    }
-
     pub fn mark_poll_success(&mut self, now_epoch: u64) {
         self.last_success_epoch = Some(now_epoch);
     }
@@ -153,7 +148,7 @@ mod tests {
         let f = filter();
         assert_eq!(st.ingest(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f).len(), 1);
         assert_eq!(st.ingest(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f).len(), 0);
-        assert_eq!(st.active_count(), 1);
+        assert_eq!(st.active().count(), 1);
     }
 
     #[test]
@@ -163,7 +158,7 @@ mod tests {
         st.ingest(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f);
         let second = st.ingest(vec![alert_with("Tornado Warning", Some(TOR_CON))], &f);
         assert!(second.is_empty());
-        assert_eq!(st.active_count(), 1);
+        assert_eq!(st.active().count(), 1);
     }
 
     #[test]
@@ -172,7 +167,7 @@ mod tests {
         let f = filter();
         st.ingest(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f);
         st.ingest(vec![alert_with("Tornado Warning", Some(TOR_CAN))], &f);
-        assert_eq!(st.active_count(), 0);
+        assert_eq!(st.active().count(), 0);
     }
 
     #[test]
@@ -180,9 +175,9 @@ mod tests {
         let mut st = AlertState::new();
         let f = filter();
         st.ingest(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f);
-        assert_eq!(st.active_count(), 1);
+        assert_eq!(st.active().count(), 1);
         st.ingest(Vec::new(), &f);
-        assert_eq!(st.active_count(), 0);
+        assert_eq!(st.active().count(), 0);
     }
 
     #[test]
@@ -206,7 +201,7 @@ mod tests {
             &f,
         );
         assert!(out.is_empty());
-        assert_eq!(st.active_count(), 0);
+        assert_eq!(st.active().count(), 0);
     }
 
     #[test]
@@ -221,7 +216,7 @@ mod tests {
             &f,
         );
         assert_eq!(out.len(), 2);
-        assert_eq!(st.active_count(), 2);
+        assert_eq!(st.active().count(), 2);
     }
 
     #[test]
@@ -235,7 +230,7 @@ mod tests {
             ],
             &f,
         );
-        assert_eq!(st.highest_tier(), Some(ThreatTier::Lethal));
+        assert_eq!(st.active().map(|a| a.tier).max(), Some(ThreatTier::Lethal));
     }
 
     #[test]

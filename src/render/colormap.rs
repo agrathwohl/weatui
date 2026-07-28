@@ -91,6 +91,7 @@ pub fn cell_rgb(dbz: Option<f32>, map: Colormap) -> Rgb {
     dbz.and_then(|v| dbz_to_rgb(v, map)).unwrap_or(NO_DATA)
 }
 
+#[cfg(test)]
 fn luminance(c: Rgb) -> f32 {
     0.2126 * c.0 as f32 + 0.7152 * c.1 as f32 + 0.0722 * c.2 as f32
 }

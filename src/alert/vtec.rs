@@ -47,9 +47,6 @@ impl VtecAction {
         })
     }
 
-    pub fn is_first_issuance(self) -> bool {
-        matches!(self, VtecAction::New)
-    }
 
     /// UPG means the event was superseded by a higher significance product,
     /// so the original must be retired to avoid a stale duplicate on screen.
@@ -163,13 +160,11 @@ mod tests {
     fn tornado_warning_key_is_distinguishable() {
         let v = VtecCode::parse("/O.NEW.KTLX.TO.W.0012.260727T0700Z-260727T0730Z/").unwrap();
         assert_eq!(v.phenomenon_significance(), "TO.W");
-        assert!(v.action.is_first_issuance());
     }
 
     #[test]
-    fn continuation_is_not_a_first_issuance() {
+    fn continuation_does_not_terminate_the_event() {
         let v = VtecCode::parse("/O.CON.KTLX.TO.W.0012.260727T0700Z-260727T0730Z/").unwrap();
-        assert!(!v.action.is_first_issuance());
         assert!(!v.action.terminates_event());
     }
 

@@ -13,6 +13,7 @@ pub const LETHAL_OUTLINE: Rgb = (255, 64, 64);
 pub const SEVERE_OUTLINE: Rgb = (255, 176, 32);
 pub const WATCH_OUTLINE: Rgb = (120, 200, 255);
 pub const HOME_MARKER: Rgb = (255, 255, 255);
+pub const RANGE_RING: Rgb = (60, 66, 78);
 
 #[derive(Debug, Clone)]
 pub struct PixelOverlay {
@@ -40,6 +41,7 @@ impl PixelOverlay {
         self.cells[y as usize * self.width + x as usize] = Some(rgb);
     }
 
+    #[cfg(test)]
     pub fn painted(&self) -> usize {
         self.cells.iter().filter(|c| c.is_some()).count()
     }
@@ -72,50 +74,64 @@ impl PixelOverlay {
         }
     }
 
-    /// Project a lat/lon vertex without clipping it away, so edges that leave
-    /// the viewport still draw the portion that is inside.
-    fn project(viewport: &Viewport, at: Coords) -> (i64, i64) {
-        let kpp = viewport.km_per_pixel();
-        if kpp <= 0.0 {
-            return (i64::MIN / 4, i64::MIN / 4);
-        }
-        const KM_PER_DEG_LAT: f64 = 111.19492664455873;
-        let lon_scale = KM_PER_DEG_LAT * viewport.centre.lat.to_radians().cos();
-        let dy_km = (at.lat - viewport.centre.lat) * KM_PER_DEG_LAT;
-        let dx_km = (at.lon - viewport.centre.lon) * lon_scale;
-        (
-            (dx_km / kpp + viewport.width as f64 / 2.0).round() as i64,
-            (viewport.height as f64 / 2.0 - dy_km / kpp).round() as i64,
-        )
-    }
-
     pub fn draw_ring(&mut self, ring: &Ring, viewport: &Viewport, rgb: Rgb) {
         if ring.len() < 2 {
             return;
         }
         let points: Vec<(i64, i64)> = ring
             .iter()
-            .map(|p| Self::project(viewport, Coords { lat: p[1], lon: p[0] }))
+            .map(|p| viewport.project_to_nearest_pixel(Coords { lat: p[1], lon: p[0] }))
             .collect();
         for pair in points.windows(2) {
             self.draw_line(pair[0], pair[1], rgb);
         }
-        if let (Some(first), Some(last)) = (points.first(), points.last()) {
-            if first != last {
+        if let (Some(first), Some(last)) = (points.first(), points.last())
+            && first != last {
                 self.draw_line(*last, *first, rgb);
             }
-        }
     }
 
     /// A crosshair rather than a filled dot, so the reflectivity underneath the
     /// user's own position stays readable.
     pub fn draw_home(&mut self, at: Coords, viewport: &Viewport, rgb: Rgb) {
-        let (cx, cy) = Self::project(viewport, at);
+        let (cx, cy) = viewport.project_to_nearest_pixel(at);
         for d in 1..=3 {
             self.set(cx - d, cy, rgb);
             self.set(cx + d, cy, rgb);
             self.set(cx, cy - d, rgb);
             self.set(cx, cy + d, rgb);
+        }
+    }
+
+    /// Radar site and its usable range. Without it there is no cue that echoes
+    /// stop because coverage ends rather than because the sky is clear.
+    pub fn draw_range_ring(
+        &mut self,
+        site: Coords,
+        radius_km: f64,
+        viewport: &Viewport,
+        rgb: Rgb,
+    ) {
+        let (cx, cy) = viewport.project_to_nearest_pixel(site);
+        self.set(cx, cy, rgb);
+        self.set(cx - 1, cy, rgb);
+        self.set(cx + 1, cy, rgb);
+        self.set(cx, cy - 1, rgb);
+        self.set(cx, cy + 1, rgb);
+
+        let kpp = viewport.km_per_pixel();
+        if kpp <= 0.0 || radius_km <= 0.0 {
+            return;
+        }
+        let radius_px = radius_km / kpp;
+        let steps = ((radius_px * 6.0) as usize).clamp(180, 4000);
+        for i in 0..steps {
+            let theta = i as f64 / steps as f64 * std::f64::consts::TAU;
+            self.set(
+                cx + (radius_px * theta.cos()).round() as i64,
+                cy + (radius_px * theta.sin()).round() as i64,
+                rgb,
+            );
         }
     }
 }

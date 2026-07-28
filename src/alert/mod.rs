@@ -34,19 +34,14 @@ impl Geometry {
 pub struct Properties {
     pub id: Option<String>,
     pub event: String,
-    pub severity: Option<String>,
-    pub urgency: Option<String>,
     pub certainty: Option<String>,
-    pub response: Option<String>,
     pub headline: Option<String>,
-    pub description: Option<String>,
+    /// The action NWS wants taken. In a tornado warning this is the most
+    /// important string in the payload, so it is surfaced rather than stored.
     pub instruction: Option<String>,
     #[serde(rename = "areaDesc")]
     pub area_desc: Option<String>,
-    pub onset: Option<String>,
     pub expires: Option<String>,
-    pub ends: Option<String>,
-    pub sent: Option<String>,
     /// Values are arrays of mixed JSON. A non-string value must not abort the
     /// whole poll, so this is deliberately untyped and read via `param`.
     #[serde(default)]

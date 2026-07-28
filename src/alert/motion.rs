@@ -60,7 +60,7 @@ impl StormMotion {
             .split(',')
             .filter_map(|s| s.trim().parse::<f64>().ok())
             .collect();
-        if nums.is_empty() || nums.len() % 2 != 0 {
+        if nums.is_empty() || !nums.len().is_multiple_of(2) {
             bail!("malformed coordinate list in {raw:?}");
         }
         let track: Vec<Coords> = nums
@@ -100,9 +100,6 @@ impl StormMotion {
         Duration::try_seconds((hours * 3600.0).round() as i64)
     }
 
-    pub fn is_closing_on(&self, target: Coords) -> bool {
-        self.eta_to(target).is_some()
-    }
 }
 
 #[cfg(test)]
@@ -151,7 +148,6 @@ mod tests {
         let raw = "2026-07-27T07:00:00-00:00...storm...000DEG...30KT...34.0994,-97.0";
         let m = StormMotion::parse(raw).unwrap();
         assert!(m.eta_to(Coords { lat: 35.0, lon: -97.0 }).is_none());
-        assert!(!m.is_closing_on(Coords { lat: 35.0, lon: -97.0 }));
     }
 
     #[test]
