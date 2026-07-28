@@ -339,9 +339,11 @@ struct AlertSnapshot {
     stale_secs: u64,
 }
 
+type RadarUpdate = (chrono::DateTime<chrono::Utc>, Box<dyn ReflectivityField>, Option<String>);
+
 enum Update {
     Alerts(Box<AlertSnapshot>),
-    Radar(Result<Box<dyn ReflectivityField>>),
+    Radar(Result<RadarUpdate>),
 }
 
 pub async fn run(cfg: Config, home: Coords) -> Result<()> {
@@ -384,11 +386,37 @@ pub async fn run(cfg: Config, home: Coords) -> Result<()> {
     let radar_tx = tx.clone();
     let refresh = Duration::from_secs(cfg.radar.refresh_secs.max(30));
     let radar_site = site_id.clone();
+    let history = cfg.radar.frames;
     tokio::spawn(async move {
+        // Without this the ring holds a single volume and there is nothing to
+        // animate until enough wall-clock time has passed to accumulate one.
+        // Frames are sent as each download finishes so the loop fills visibly.
+        match fetch::recent_archive_ids(&radar_site, history.saturating_sub(1)).await {
+            Ok(ids) => {
+                let total = ids.len();
+                for (i, id) in ids.into_iter().enumerate() {
+                    let loaded = fetch::archived_field(id).await.map(|(at, f)| {
+                        (at, Box::new(f) as Box<dyn ReflectivityField>)
+                    });
+                    let progress = format!("backfill {}/{total}", i + 1);
+                    if radar_tx
+                        .send(Update::Radar(loaded.map(|f| (f.0, f.1, Some(progress)))))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                let _ = radar_tx.send(Update::Radar(Err(e))).await;
+            }
+        }
+
         loop {
             let result = fetch::latest_field(&radar_site)
                 .await
-                .map(|f| Box::new(f) as Box<dyn ReflectivityField>);
+                .map(|(at, f)| (at, Box::new(f) as Box<dyn ReflectivityField>, None));
             if radar_tx.send(Update::Radar(result)).await.is_err() {
                 return;
             }
@@ -436,9 +464,8 @@ async fn event_loop(
                         ),
                     };
                 }
-                Update::Radar(Ok(field)) => {
+                Update::Radar(Ok((observed_at, field, backfill))) => {
                     app.ring.drop_projected();
-                    let observed_at = chrono::Utc::now();
                     let observed: Arc<dyn ReflectivityField> = Arc::from(field);
                     let tilt = observed.elevation_degrees();
                     app.ring.push(RadarFrame {
@@ -447,8 +474,10 @@ async fn event_loop(
                         projected: false,
                     });
 
-                    let projection = match mean_storm_motion(&app.active) {
-                        Some((heading, speed)) => {
+                    // Projections are only meaningful off the newest volume, so
+                    // they are skipped while history is still loading.
+                    let projection = match (&backfill, mean_storm_motion(&app.active)) {
+                        (None, Some((heading, speed))) => {
                             for minutes in PROJECTION_STEPS_MIN {
                                 app.ring.push(RadarFrame {
                                     captured_at: observed_at
@@ -462,18 +491,28 @@ async fn event_loop(
                                     projected: true,
                                 });
                             }
-                            format!(" +{}min projected @ {heading:.0}deg {speed:.0}kt",
-                                PROJECTION_STEPS_MIN.last().copied().unwrap_or(0.0))
+                            format!(
+                                " | +{}min projected @ {heading:.0}deg {speed:.0}kt",
+                                PROJECTION_STEPS_MIN.last().copied().unwrap_or(0.0)
+                            )
                         }
-                        None => String::new(),
+                        _ => String::new(),
                     };
 
-                    app.status = format!(
-                        "{} {:.1}deg tilt, {} frames{projection}",
-                        app.site.id,
-                        tilt,
-                        app.ring.len()
-                    );
+                    app.status = match backfill {
+                        Some(progress) => format!(
+                            "{} {progress} | {} frames | {:.1}deg tilt",
+                            app.site.id,
+                            app.ring.len(),
+                            tilt
+                        ),
+                        None => format!(
+                            "{} | {} frames | {:.1}deg tilt{projection}",
+                            app.site.id,
+                            app.ring.len(),
+                            tilt
+                        ),
+                    };
                 }
                 Update::Radar(Err(e)) => {
                     app.status = format!("radar fetch failed: {e:#}");

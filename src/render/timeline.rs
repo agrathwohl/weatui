@@ -33,7 +33,13 @@ pub fn status_text(ring: &FrameRing) -> String {
     }
     let transport = if ring.is_playing() { glyph::PLAY } else { glyph::PAUSE };
     let position = format!("{}/{}", ring.cursor() + 1, ring.len());
-    let live = if ring.is_following_live() { " LIVE" } else { " SCRUB" };
+    // Playback legitimately parks the cursor off the newest frame, so SCRUB is
+    // reserved for the user actually driving it.
+    let live = match (ring.is_following_live(), ring.is_playing()) {
+        (true, _) => " LIVE",
+        (false, true) => " LOOP",
+        (false, false) => " SCRUB",
+    };
     let stamp = ring
         .current()
         .map(|f| f.captured_at.format("%H:%M:%SZ").to_string())
@@ -130,7 +136,9 @@ mod tests {
         r.step_back();
         let t: Vec<char> = track(&r).chars().collect();
         assert_eq!(t[2], CURSOR);
-        assert!(status_text(&r).contains("SCRUB"));
+        assert!(status_text(&r).contains("LOOP"), "playing off-newest is a loop, not a scrub");
+        r.toggle_play();
+        assert!(status_text(&r).contains("SCRUB"), "paused off-newest is a scrub");
     }
 
     #[test]
