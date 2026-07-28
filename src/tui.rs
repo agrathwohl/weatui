@@ -146,7 +146,10 @@ impl App {
             active: Vec::new(),
             stale: false,
             stale_secs: 0,
-            ring: FrameRing::new(cfg.radar.frames),
+            // Projections are appended alongside observations, so capacity must
+            // cover both. Sizing the ring to `frames` alone means enabling
+            // projections silently evicts that many observed volumes.
+            ring: FrameRing::new(cfg.radar.frames + PROJECTION_STEPS_MIN.len()),
             viewport: Viewport::new(home, DEFAULT_SPAN_KM, 1, 1),
             home,
             site,
@@ -339,7 +342,13 @@ struct AlertSnapshot {
     stale_secs: u64,
 }
 
-type RadarUpdate = (chrono::DateTime<chrono::Utc>, Box<dyn ReflectivityField>, Option<String>);
+struct RadarUpdate {
+    observed_at: chrono::DateTime<chrono::Utc>,
+    field: Box<dyn ReflectivityField>,
+    /// `Some` while history is still loading, carrying "n/total" for the
+    /// status line. Projections are suppressed until it is `None`.
+    backfill: Option<String>,
+}
 
 enum Update {
     Alerts(Box<AlertSnapshot>),
@@ -396,11 +405,11 @@ pub async fn run(cfg: Config, home: Coords) -> Result<()> {
                 let total = ids.len();
                 for (i, id) in ids.into_iter().enumerate() {
                     let loaded = fetch::archived_field(id).await.map(|(at, f)| {
-                        (at, Box::new(f) as Box<dyn ReflectivityField>)
+                        RadarUpdate { observed_at: at, field: Box::new(f), backfill: None }
                     });
                     let progress = format!("backfill {}/{total}", i + 1);
                     if radar_tx
-                        .send(Update::Radar(loaded.map(|f| (f.0, f.1, Some(progress)))))
+                        .send(Update::Radar(loaded.map(|mut u| { u.backfill = Some(progress); u })))
                         .await
                         .is_err()
                     {
@@ -416,7 +425,7 @@ pub async fn run(cfg: Config, home: Coords) -> Result<()> {
         loop {
             let result = fetch::latest_field(&radar_site)
                 .await
-                .map(|(at, f)| (at, Box::new(f) as Box<dyn ReflectivityField>, None));
+                .map(|(at, f)| RadarUpdate { observed_at: at, field: Box::new(f), backfill: None });
             if radar_tx.send(Update::Radar(result)).await.is_err() {
                 return;
             }
@@ -464,7 +473,7 @@ async fn event_loop(
                         ),
                     };
                 }
-                Update::Radar(Ok((observed_at, field, backfill))) => {
+                Update::Radar(Ok(RadarUpdate { observed_at, field, backfill })) => {
                     app.ring.drop_projected();
                     let observed: Arc<dyn ReflectivityField> = Arc::from(field);
                     let tilt = observed.elevation_degrees();

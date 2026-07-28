@@ -298,6 +298,59 @@ mod tests {
         assert_eq!(r.cursor(), 0);
     }
 
+    fn projected_frame(minute: u32) -> RadarFrame {
+        RadarFrame { projected: true, ..frame(minute) }
+    }
+
+    /// Projections share the ring with observations, so a capacity sized only
+    /// to the history count silently evicts that many observed volumes as soon
+    /// as projections are appended.
+    #[test]
+    fn capacity_covering_projections_preserves_every_observed_frame() {
+        let history = 6;
+        let projections = 3;
+        let mut r = FrameRing::new(history + projections);
+        for i in 0..history {
+            r.push(frame(i as u32));
+        }
+        for i in 0..projections {
+            r.push(projected_frame((history + i) as u32));
+        }
+        assert_eq!(r.frames().filter(|f| !f.projected).count(), history);
+        assert_eq!(r.frames().next().unwrap().captured_at, frame(0).captured_at);
+    }
+
+    #[test]
+    fn undersized_capacity_would_drop_history_which_is_why_it_is_padded() {
+        let mut r = FrameRing::new(6);
+        for i in 0..6 {
+            r.push(frame(i));
+        }
+        for i in 0..3 {
+            r.push(projected_frame(6 + i));
+        }
+        assert_eq!(
+            r.frames().filter(|f| !f.projected).count(),
+            3,
+            "documents the eviction that padding the capacity avoids"
+        );
+    }
+
+    #[test]
+    fn dropping_projections_restores_room_for_the_next_observation() {
+        let mut r = FrameRing::new(9);
+        for i in 0..6 {
+            r.push(frame(i));
+        }
+        for i in 0..3 {
+            r.push(projected_frame(6 + i));
+        }
+        r.drop_projected();
+        assert_eq!(r.len(), 6);
+        assert!(r.frames().all(|f| !f.projected));
+        assert_eq!(r.frames().next().unwrap().captured_at, frame(0).captured_at);
+    }
+
     #[test]
     fn zero_capacity_is_clamped_so_a_frame_can_still_be_held() {
         let mut r = FrameRing::new(0);

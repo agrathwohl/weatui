@@ -71,7 +71,7 @@ impl Hud<'_> {
         )));
 
         let mut active: Vec<&ActiveAlert> = self.active.iter().collect();
-        active.sort_by(|a, b| b.tier.cmp(&a.tier));
+        active.sort_by_key(|a| std::cmp::Reverse(a.tier));
 
         if active.is_empty() && !self.stale {
             lines.push(Line::from(Span::styled(
