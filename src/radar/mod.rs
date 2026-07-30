@@ -5,71 +5,22 @@
 //! breaking pre-release change from reaching the render or alert layers.
 
 pub mod fetch;
+pub mod hrrr;
 pub mod grid;
 pub mod ring;
 
 use crate::geo::Coords;
 
+/// A field of reflectivity that can be sampled anywhere.
+///
+/// Deliberately carries no site or range: those are properties of a radar, and
+/// an HRRR forecast grid has neither. Keeping them here forced the forecast
+/// implementation to invent values, which is how a caller ends up drawing
+/// coverage geometry for something that has no coverage.
 pub trait ReflectivityField: Send + Sync {
     fn dbz_at(&self, at: Coords) -> Option<f32>;
-    fn site_id(&self) -> &str;
-    fn site_coords(&self) -> Coords;
-    fn max_range_km(&self) -> f64;
+    fn source_label(&self) -> &str;
     fn elevation_degrees(&self) -> f32;
-}
-
-/// Whole-field advection along a storm motion vector.
-///
-/// NEXRAD is observed-only, so the sole honest way to show "upcoming" is to
-/// translate the most recent observation along the motion NWS published and
-/// label the result as projected. Storms rotate, grow and decay; this does
-/// none of that. It answers "where would this be if nothing changed", which is
-/// useful for lead time and is not a forecast.
-pub struct AdvectedField {
-    base: std::sync::Arc<dyn ReflectivityField>,
-    north_km: f64,
-    east_km: f64,
-}
-
-impl AdvectedField {
-    pub fn new(
-        base: std::sync::Arc<dyn ReflectivityField>,
-        heading_deg: f64,
-        speed_kt: f64,
-        minutes: f64,
-    ) -> Self {
-        let km = speed_kt * crate::geo::KM_PER_KNOT_HOUR * (minutes / 60.0);
-        let theta = heading_deg.to_radians();
-        AdvectedField { base, north_km: km * theta.cos(), east_km: km * theta.sin() }
-    }
-}
-
-impl ReflectivityField for AdvectedField {
-    /// Sampling the source at `at` minus the displacement moves the echo
-    /// forward along the vector.
-    fn dbz_at(&self, at: Coords) -> Option<f32> {
-        const KM_PER_DEG_LAT: f64 = 111.19492664455873;
-        let lon_scale = KM_PER_DEG_LAT * at.lat.to_radians().cos();
-        let source = Coords {
-            lat: at.lat - self.north_km / KM_PER_DEG_LAT,
-            lon: at.lon
-                - if lon_scale.abs() < f64::EPSILON { 0.0 } else { self.east_km / lon_scale },
-        };
-        self.base.dbz_at(source)
-    }
-
-    fn site_id(&self) -> &str {
-        self.base.site_id()
-    }
-    fn site_coords(&self) -> Coords {
-        self.base.site_coords()
-    }
-    fn max_range_km(&self) -> f64 {
-        self.base.max_range_km()
-    }
-    fn elevation_degrees(&self) -> f32 {
-        self.base.elevation_degrees()
-    }
 }
 
 /// A rectangular half-block pixel grid. `height` counts pixels, so a terminal
@@ -131,14 +82,8 @@ pub(crate) mod testing {
                 None
             }
         }
-        fn site_id(&self) -> &str {
+        fn source_label(&self) -> &str {
             "TEST"
-        }
-        fn site_coords(&self) -> Coords {
-            self.centre
-        }
-        fn max_range_km(&self) -> f64 {
-            self.radius_km
         }
         fn elevation_degrees(&self) -> f32 {
             0.5
@@ -174,64 +119,6 @@ mod tests {
         assert_eq!(g.get(4, 0), None);
         assert_eq!(g.get(0, 6), None);
         assert_eq!(g.populated_cells(), 0);
-    }
-
-    #[test]
-    fn advection_moves_the_echo_along_the_heading_not_against_it() {
-        use crate::radar::testing::DiskField;
-        use std::sync::Arc;
-
-        let origin = Coords { lat: 35.0, lon: -97.0 };
-        let base = Arc::new(DiskField { centre: origin, radius_km: 10.0, dbz: 45.0 });
-
-        // 60 kt for 30 min is 60 * 1.852 * 0.5 = 55.56 km, not 30 km.
-        let advected = AdvectedField::new(base.clone(), 0.0, 60.0, 30.0);
-        let displaced = Coords { lat: 35.0 + 55.56 / 111.19492664455873, lon: -97.0 };
-        assert_eq!(
-            advected.dbz_at(displaced),
-            Some(45.0),
-            "a storm heading due north must appear north of where it was"
-        );
-        assert_eq!(advected.dbz_at(origin), None, "it should have vacated the origin");
-    }
-
-    #[test]
-    fn advection_by_zero_minutes_is_the_identity() {
-        use crate::radar::testing::DiskField;
-        use std::sync::Arc;
-
-        let origin = Coords { lat: 35.0, lon: -97.0 };
-        let base = Arc::new(DiskField { centre: origin, radius_km: 10.0, dbz: 45.0 });
-        let advected = AdvectedField::new(base, 137.0, 42.0, 0.0);
-        assert_eq!(advected.dbz_at(origin), Some(45.0));
-    }
-
-    #[test]
-    fn advection_preserves_the_underlying_site_metadata() {
-        use crate::radar::testing::DiskField;
-        use std::sync::Arc;
-
-        let base = Arc::new(DiskField {
-            centre: Coords { lat: 35.0, lon: -97.0 },
-            radius_km: 10.0,
-            dbz: 45.0,
-        });
-        let advected = AdvectedField::new(base, 90.0, 30.0, 15.0);
-        assert_eq!(advected.site_id(), "TEST");
-        assert!((advected.elevation_degrees() - 0.5).abs() < 1e-6);
-    }
-
-    #[test]
-    fn eastward_advection_moves_east() {
-        use crate::radar::testing::DiskField;
-        use std::sync::Arc;
-
-        let origin = Coords { lat: 35.0, lon: -97.0 };
-        let base = Arc::new(DiskField { centre: origin, radius_km: 5.0, dbz: 50.0 });
-        let advected = AdvectedField::new(base, 90.0, 60.0, 60.0);
-        let km_per_deg_lon = 111.19492664455873 * 35.0_f64.to_radians().cos();
-        let east = Coords { lat: 35.0, lon: -97.0 + 111.19492664455873 / km_per_deg_lon };
-        assert!(advected.dbz_at(east).is_some(), "should have advected roughly 111 km east");
     }
 
     #[test]

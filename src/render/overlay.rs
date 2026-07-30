@@ -13,7 +13,7 @@ pub const LETHAL_OUTLINE: Rgb = (255, 64, 64);
 pub const SEVERE_OUTLINE: Rgb = (255, 176, 32);
 pub const WATCH_OUTLINE: Rgb = (120, 200, 255);
 pub const HOME_MARKER: Rgb = (255, 255, 255);
-pub const RANGE_RING: Rgb = (60, 66, 78);
+pub const DISTANCE_RING: Rgb = (60, 66, 78);
 
 #[derive(Debug, Clone)]
 pub struct PixelOverlay {
@@ -103,35 +103,32 @@ impl PixelOverlay {
         }
     }
 
-    /// Radar site and its usable range. Without it there is no cue that echoes
-    /// stop because coverage ends rather than because the sky is clear.
-    pub fn draw_range_ring(
+    pub fn draw_distance_rings(
         &mut self,
-        site: Coords,
-        radius_km: f64,
+        centre: Coords,
+        radii_km: &[f64],
         viewport: &Viewport,
         rgb: Rgb,
     ) {
-        let (cx, cy) = viewport.project_to_nearest_pixel(site);
-        self.set(cx, cy, rgb);
-        self.set(cx - 1, cy, rgb);
-        self.set(cx + 1, cy, rgb);
-        self.set(cx, cy - 1, rgb);
-        self.set(cx, cy + 1, rgb);
-
         let kpp = viewport.km_per_pixel();
-        if kpp <= 0.0 || radius_km <= 0.0 {
+        if kpp <= 0.0 {
             return;
         }
-        let radius_px = radius_km / kpp;
-        let steps = ((radius_px * 6.0) as usize).clamp(180, 4000);
-        for i in 0..steps {
-            let theta = i as f64 / steps as f64 * std::f64::consts::TAU;
-            self.set(
-                cx + (radius_px * theta.cos()).round() as i64,
-                cy + (radius_px * theta.sin()).round() as i64,
-                rgb,
-            );
+        let (cx, cy) = viewport.project_to_nearest_pixel(centre);
+        for radius_km in radii_km.iter().copied().filter(|r| *r > 0.0) {
+            let radius_px = radius_km / kpp;
+            if radius_px < 2.0 || radius_px > self.width as f64 * 2.0 {
+                continue;
+            }
+            let steps = ((radius_px * 6.0) as usize).clamp(180, 4000);
+            for i in 0..steps {
+                let theta = i as f64 / steps as f64 * std::f64::consts::TAU;
+                self.set(
+                    cx + (radius_px * theta.cos()).round() as i64,
+                    cy + (radius_px * theta.sin()).round() as i64,
+                    rgb,
+                );
+            }
         }
     }
 }

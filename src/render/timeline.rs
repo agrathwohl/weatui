@@ -36,10 +36,12 @@ pub fn status_text(ring: &FrameRing, tz: Tz) -> String {
     let position = format!("{}/{}", ring.cursor() + 1, ring.len());
     // Playback legitimately parks the cursor off the newest frame, so SCRUB is
     // reserved for the user actually driving it.
-    let live = match (ring.is_following_live(), ring.is_playing()) {
-        (true, _) => " LIVE",
-        (false, true) => " LOOP",
-        (false, false) => " SCRUB",
+    let on_forecast = ring.current().is_some_and(|f| f.projected);
+    let live = match (on_forecast, ring.is_following_live(), ring.is_playing()) {
+        (true, _, _) => " FCST",
+        (false, true, _) => " LIVE",
+        (false, false, true) => " LOOP",
+        (false, false, false) => " SCRUB",
     };
     let stamp = ring
         .current()
@@ -142,6 +144,27 @@ mod tests {
         assert!(status_text(&r, CT).contains("LOOP"), "playing off-newest is a loop, not a scrub");
         r.toggle_play();
         assert!(status_text(&r, CT).contains("SCRUB"), "paused off-newest is a scrub");
+    }
+
+    /// LIVE means the newest observation, not the newest frame. Once forecast
+    /// frames exist the newest frame is the furthest into the future, and
+    /// labelling that LIVE would present a model run as a measurement.
+    #[test]
+    fn sitting_on_a_forecast_frame_is_labelled_forecast_not_live() {
+        let r = ring_with(3, 2);
+        assert!(r.is_following_live(), "cursor is on the newest frame");
+        let text = status_text(&r, CT);
+        assert!(text.contains("FCST"), "got: {text}");
+        assert!(!text.contains("LIVE"), "a forecast must never read as live: {text}");
+    }
+
+    #[test]
+    fn stepping_back_onto_an_observation_restores_the_observed_label() {
+        let mut r = ring_with(3, 2);
+        r.step_back();
+        r.step_back();
+        assert!(!r.current().unwrap().projected);
+        assert!(!status_text(&r, CT).contains("FCST"));
     }
 
     #[test]

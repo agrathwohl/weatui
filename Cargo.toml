@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1.0.104"
 chrono = "0.4.45"
 chrono-tz = "0.10.4"
+grib = { version = "0.16.0", default-features = false, features = ["png-unpack-with-png-crate", "ccsds-unpack-with-rust-aec", "jpeg2000-unpack-with-hayro"] }
 nexrad = { version = "1.0.0-rc.4", default-features = false, features = ["aws-polling", "decode", "model", "chrono"] }
 ratatui = "0.30.2"
 reqwest = { version = "0.13.4", features = ["json", "gzip"] }

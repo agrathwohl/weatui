@@ -19,13 +19,12 @@ const MAX_CHUNKS_PER_VOLUME: usize = 100;
 
 pub struct NexradField {
     site_id: String,
-    site_coords: Coords,
     system: RadarCoordinateSystem,
     field: SweepField,
-    max_range_km: f64,
 }
 
 impl NexradField {
+
     /// Base reflectivity is the lowest tilt that actually carries a
     /// reflectivity moment; higher tilts overshoot low-level storm structure.
     pub fn from_scan(scan: &Scan) -> Result<Self> {
@@ -49,12 +48,7 @@ impl NexradField {
 
         Ok(NexradField {
             site_id: site.identifier_string(),
-            site_coords: Coords {
-                lat: site.latitude() as f64,
-                lon: site.longitude() as f64,
-            },
             system: RadarCoordinateSystem::new(site),
-            max_range_km: field.max_range_km(),
             field,
         })
     }
@@ -72,16 +66,8 @@ impl ReflectivityField for NexradField {
         matches!(status, GateStatus::Valid).then_some(value)
     }
 
-    fn site_id(&self) -> &str {
+    fn source_label(&self) -> &str {
         &self.site_id
-    }
-
-    fn site_coords(&self) -> Coords {
-        self.site_coords
-    }
-
-    fn max_range_km(&self) -> f64 {
-        self.max_range_km
     }
 
     fn elevation_degrees(&self) -> f32 {
@@ -178,15 +164,14 @@ mod tests {
     async fn live_volume_resamples_into_a_populated_grid() {
         let (observed_at, field) = latest_field("KTLX").await.expect("fetch KTLX");
         eprintln!("volume observed at {observed_at}");
-        assert_eq!(field.site_id().trim(), "KTLX");
-        assert!(field.max_range_km() > 100.0, "range {}", field.max_range_km());
+        assert_eq!(field.source_label().trim(), "KTLX");
 
-        let grid = rasterize(&field, &Viewport::new(field.site_coords(), 400.0, 200, 100));
+        let site = crate::geo::radar_site_by_id("KTLX").expect("KTLX is in the embedded table");
+        let grid = rasterize(&field, &Viewport::new(site.coords, 400.0, 200, 100));
         eprintln!(
-            "site {} elev {:.2} deg range {:.0} km -> {}/{} pixels populated, dbz {:?}",
-            field.site_id(),
+            "site {} elev {:.2} deg -> {}/{} pixels populated, dbz {:?}",
+            field.source_label(),
             field.elevation_degrees(),
-            field.max_range_km(),
             grid.populated_cells(),
             grid.width * grid.height,
             grid.value_range()
@@ -205,7 +190,7 @@ mod tests {
         let mut stamps = Vec::new();
         for id in ids {
             let (at, field) = archived_field(id).await.expect("decode archived volume");
-            eprintln!("{at}  {}  {:.2} deg", field.site_id(), field.elevation_degrees());
+            eprintln!("{at}  {}  {:.2} deg", field.source_label(), field.elevation_degrees());
             stamps.push(at);
         }
 

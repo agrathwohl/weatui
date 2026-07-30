@@ -7,10 +7,10 @@ use crate::geo::{Coords, RadarSite, nearest_radar_site, radar_site_by_id};
 use crate::notify;
 use crate::radar::grid::{Viewport, rasterize};
 use crate::radar::ring::{FrameRing, RadarFrame};
-use crate::radar::{AdvectedField, ReflectivityField, fetch};
+use crate::radar::{ReflectivityField, fetch};
 use crate::render::hud::Hud;
 use crate::render::overlay::{
-    HOME_MARKER, LETHAL_OUTLINE, PixelOverlay, RANGE_RING, SEVERE_OUTLINE, WATCH_OUTLINE,
+    HOME_MARKER, LETHAL_OUTLINE, PixelOverlay, DISTANCE_RING, SEVERE_OUTLINE, WATCH_OUTLINE,
 };
 use crate::render::raster::RadarRaster;
 use crate::render::timeline::Timeline;
@@ -30,7 +30,8 @@ const MIN_SPAN_KM: f64 = 20.0;
 const MAX_SPAN_KM: f64 = 900.0;
 const DEFAULT_SPAN_KM: f64 = 260.0;
 const HUD_WIDTH: u16 = 34;
-const PROJECTION_STEPS_MIN: &[f64] = &[10.0, 20.0, 30.0];
+const DISTANCE_RING_KM: &[f64] = &[25.0, 50.0, 100.0];
+const MAX_FORECAST_FRAMES: usize = 18;
 
 const HELP: &str = "\
  MAP
@@ -46,12 +47,54 @@ const HELP: &str = "\
    space      play / pause
    < >        slower / faster
 
+ FORECAST
+   f          cycle horizon: 2h / 6h / 18h
+
    ?          toggle this help
    q  ZZ      quit
 ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForecastHorizon {
+    Near,
+    Mid,
+    Long,
+}
+
+impl ForecastHorizon {
+    pub fn steps(self) -> Vec<crate::radar::hrrr::ForecastStep> {
+        use crate::radar::hrrr::{hourly_steps, quarter_hourly_steps};
+        match self {
+            ForecastHorizon::Near => quarter_hourly_steps(2),
+            ForecastHorizon::Mid => {
+                let mut steps = quarter_hourly_steps(2);
+                steps.extend(hourly_steps(3, 6));
+                steps
+            }
+            ForecastHorizon::Long => hourly_steps(1, 18),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ForecastHorizon::Near => "+2h/15m",
+            ForecastHorizon::Mid => "+6h",
+            ForecastHorizon::Long => "+18h",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            ForecastHorizon::Near => ForecastHorizon::Mid,
+            ForecastHorizon::Mid => ForecastHorizon::Long,
+            ForecastHorizon::Long => ForecastHorizon::Near,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
+    CycleForecast,
     PanWest,
     PanSouth,
     PanNorth,
@@ -107,6 +150,7 @@ pub fn resolve_key(pending: &mut Option<char>, key: KeyEvent) -> Action {
         KeyCode::Char(' ') => Action::TogglePlay,
         KeyCode::Char('>') => Action::Faster,
         KeyCode::Char('<') => Action::Slower,
+        KeyCode::Char('f') => Action::CycleForecast,
         KeyCode::Char('?') => Action::ToggleHelp,
         KeyCode::Char('q') | KeyCode::Esc => Action::Quit,
         KeyCode::Char(c @ ('g' | 'z' | 'Z')) => {
@@ -129,6 +173,8 @@ pub struct App {
     tz: chrono_tz::Tz,
     pending: Option<char>,
     playback: Duration,
+    horizon: ForecastHorizon,
+    horizon_tx: Option<tokio::sync::watch::Sender<ForecastHorizon>>,
     show_help: bool,
     quit: bool,
     status: String,
@@ -150,7 +196,7 @@ impl App {
             // Projections are appended alongside observations, so capacity must
             // cover both. Sizing the ring to `frames` alone means enabling
             // projections silently evicts that many observed volumes.
-            ring: FrameRing::new(cfg.radar.frames + PROJECTION_STEPS_MIN.len()),
+            ring: FrameRing::new(cfg.radar.frames + MAX_FORECAST_FRAMES),
             viewport: Viewport::new(home, DEFAULT_SPAN_KM, 1, 1),
             home,
             site,
@@ -158,6 +204,8 @@ impl App {
             tz,
             pending: None,
             playback: Duration::from_millis(450),
+            horizon: ForecastHorizon::Near,
+            horizon_tx: None,
             show_help: false,
             quit: false,
             status: format!(
@@ -195,6 +243,13 @@ impl App {
             Action::Slower => {
                 self.playback = self.playback.mul_f64(1.4).min(Duration::from_millis(4000))
             }
+            Action::CycleForecast => {
+                self.horizon = self.horizon.next();
+                if let Some(tx) = &self.horizon_tx {
+                    let _ = tx.send(self.horizon);
+                }
+                self.status = format!("forecast horizon {}", self.horizon.label());
+            }
             Action::ToggleHelp => self.show_help = !self.show_help,
             Action::Quit => self.quit = true,
             Action::Ignored => {}
@@ -203,14 +258,7 @@ impl App {
 
     fn build_overlay(&self, width: usize, height: usize) -> PixelOverlay {
         let mut overlay = PixelOverlay::new(width, height);
-        if let Some(frame) = self.ring.current() {
-            overlay.draw_range_ring(
-                frame.field.site_coords(),
-                frame.field.max_range_km(),
-                &self.viewport,
-                RANGE_RING,
-            );
-        }
+        overlay.draw_distance_rings(self.home, DISTANCE_RING_KM, &self.viewport, DISTANCE_RING);
         let mut ordered: Vec<_> = self.active.iter().collect();
         ordered.sort_by_key(|a| a.tier);
         for entry in ordered {
@@ -297,33 +345,6 @@ impl App {
     }
 }
 
-/// Vector mean of the motions NWS published for the currently active warnings.
-/// Averaging headings numerically would be wrong across the 0/360 seam, so the
-/// components are averaged and the heading recovered with atan2.
-fn mean_storm_motion(active: &[crate::alert::state::ActiveAlert]) -> Option<(f64, f64)> {
-    let mut north = 0.0;
-    let mut east = 0.0;
-    let mut count = 0.0;
-    for entry in active {
-        if let Some(m) = entry.alert.motion() {
-            let theta = m.heading_deg().to_radians();
-            north += m.speed_kt * theta.cos();
-            east += m.speed_kt * theta.sin();
-            count += 1.0;
-        }
-    }
-    if count == 0.0 {
-        return None;
-    }
-    north /= count;
-    east /= count;
-    let speed = (north * north + east * east).sqrt();
-    if speed < 1.0 {
-        return None;
-    }
-    Some(((east.atan2(north).to_degrees() + 360.0) % 360.0, speed))
-}
-
 fn centred(width: u16, height: u16, area: Rect) -> Rect {
     let w = width.min(area.width);
     let h = height.min(area.height);
@@ -353,9 +374,21 @@ struct RadarUpdate {
     backfill: Option<String>,
 }
 
+struct ForecastUpdate {
+    valid_at: chrono::DateTime<chrono::Utc>,
+    field: Box<dyn ReflectivityField>,
+    lead_minutes: i64,
+    /// Marks the start of a batch so the ring can retire the previous
+    /// forecast before the replacement lands, rather than interleaving two.
+    first_of_batch: bool,
+    index: usize,
+    total: usize,
+}
+
 enum Update {
     Alerts(Box<AlertSnapshot>),
     Radar(Result<RadarUpdate>),
+    Forecast(Result<Box<ForecastUpdate>>),
 }
 
 pub async fn run(cfg: Config, home: Coords) -> Result<()> {
@@ -444,6 +477,75 @@ pub async fn run(cfg: Config, home: Coords) -> Result<()> {
         }
     });
 
+    let (horizon_tx, mut horizon_rx) = tokio::sync::watch::channel(ForecastHorizon::Near);
+    app.horizon_tx = Some(horizon_tx);
+
+    let forecast_tx = tx.clone();
+    tokio::spawn(async move {
+        let client = match reqwest::Client::builder()
+            .user_agent(crate::alert::poll::USER_AGENT)
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = forecast_tx
+                    .send(Update::Forecast(Err(anyhow::anyhow!("{e}"))))
+                    .await;
+                return;
+            }
+        };
+
+        loop {
+            let horizon = *horizon_rx.borrow_and_update();
+            match crate::radar::hrrr::latest_cycle(&client, chrono::Utc::now()).await {
+                Ok(cycle) => {
+                    // A cycle can be an hour old, so its earliest steps are
+                    // already covered by observations. Fetching them would
+                    // interleave stale model output with real radar.
+                    let now = chrono::Utc::now();
+                    let steps: Vec<_> = horizon
+                        .steps()
+                        .into_iter()
+                        .filter(|s| cycle + chrono::Duration::minutes(s.lead_minutes()) > now)
+                        .collect();
+                    let total = steps.len();
+                    for (index, step) in steps.into_iter().enumerate() {
+                        let update = crate::radar::hrrr::fetch_step(&client, cycle, step)
+                            .await
+                            .map(|f| {
+                                Box::new(ForecastUpdate {
+                                    valid_at: f.valid_at,
+                                    lead_minutes: f.lead_minutes,
+                                    field: Box::new(f),
+                                    first_of_batch: index == 0,
+                                    index,
+                                    total,
+                                })
+                            });
+                        if forecast_tx.send(Update::Forecast(update)).await.is_err() {
+                            return;
+                        }
+                        // A horizon change mid-batch abandons the rest rather
+                        // than finishing frames the user is no longer viewing.
+                        if horizon_rx.has_changed().unwrap_or(false) {
+                            break;
+                        }
+                    }
+                }
+                Err(e) => {
+                    if forecast_tx.send(Update::Forecast(Err(e))).await.is_err() {
+                        return;
+                    }
+                }
+            }
+
+            tokio::select! {
+                _ = horizon_rx.changed() => {}
+                _ = tokio::time::sleep(Duration::from_secs(900)) => {}
+            }
+        }
+    });
+
     let mut term = setup()?;
     let outcome = event_loop(&mut app, &mut rx, &mut term).await;
     restore(&mut term)?;
@@ -485,7 +587,6 @@ async fn event_loop(
                     };
                 }
                 Update::Radar(Ok(RadarUpdate { observed_at, field, backfill })) => {
-                    app.ring.drop_projected();
                     let observed: Arc<dyn ReflectivityField> = Arc::from(field);
                     let tilt = observed.elevation_degrees();
                     app.ring.push(RadarFrame {
@@ -493,31 +594,6 @@ async fn event_loop(
                         field: observed.clone(),
                         projected: false,
                     });
-
-                    // Projections are only meaningful off the newest volume, so
-                    // they are skipped while history is still loading.
-                    let projection = match (&backfill, mean_storm_motion(&app.active)) {
-                        (None, Some((heading, speed))) => {
-                            for minutes in PROJECTION_STEPS_MIN {
-                                app.ring.push(RadarFrame {
-                                    captured_at: observed_at
-                                        + chrono::Duration::minutes(*minutes as i64),
-                                    field: Arc::new(AdvectedField::new(
-                                        observed.clone(),
-                                        heading,
-                                        speed,
-                                        *minutes,
-                                    )),
-                                    projected: true,
-                                });
-                            }
-                            format!(
-                                " | +{}min projected @ {heading:.0}deg {speed:.0}kt",
-                                PROJECTION_STEPS_MIN.last().copied().unwrap_or(0.0)
-                            )
-                        }
-                        _ => String::new(),
-                    };
 
                     app.status = match backfill {
                         Some(progress) => format!(
@@ -527,12 +603,32 @@ async fn event_loop(
                             tilt
                         ),
                         None => format!(
-                            "{} | {} frames | {:.1}deg tilt{projection}",
+                            "{} | {} frames | {:.1}deg tilt",
                             app.site.id,
                             app.ring.len(),
                             tilt
                         ),
                     };
+                }
+                Update::Forecast(Ok(update)) => {
+                    if update.first_of_batch {
+                        app.ring.drop_projected();
+                    }
+                    app.ring.push(RadarFrame {
+                        captured_at: update.valid_at,
+                        field: Arc::from(update.field),
+                        projected: true,
+                    });
+                    app.status = format!(
+                        "HRRR {} | +{}min | {}/{}",
+                        app.horizon.label(),
+                        update.lead_minutes,
+                        update.index + 1,
+                        update.total
+                    );
+                }
+                Update::Forecast(Err(e)) => {
+                    app.status = format!("forecast unavailable: {e:#}");
                 }
                 Update::Radar(Err(e)) => {
                     app.status = format!("radar fetch failed: {e:#}");

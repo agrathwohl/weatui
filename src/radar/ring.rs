@@ -21,7 +21,7 @@ impl std::fmt::Debug for RadarFrame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RadarFrame")
             .field("captured_at", &self.captured_at)
-            .field("site", &self.field.site_id())
+            .field("site", &self.field.source_label())
             .field("projected", &self.projected)
             .finish()
     }
@@ -46,10 +46,24 @@ impl FrameRing {
         }
     }
 
+    /// Inserted by validity time rather than appended, because observations and
+    /// forecasts arrive from independent tasks: a volume fetched after a
+    /// forecast batch is still older than it, and appending would put the past
+    /// to the right of the future on a time axis.
+    ///
     /// Frames arriving while the user is scrubbing history must not yank the
     /// view forward, so the cursor only tracks the newest frame when following.
     pub fn push(&mut self, frame: RadarFrame) {
-        self.frames.push_back(frame);
+        let at = self
+            .frames
+            .iter()
+            .position(|f| f.captured_at > frame.captured_at)
+            .unwrap_or(self.frames.len());
+        self.frames.insert(at, frame);
+        if at <= self.cursor && self.cursor + 1 < self.frames.len() {
+            self.cursor += 1;
+        }
+
         while self.frames.len() > self.capacity {
             self.frames.pop_front();
             self.cursor = self.cursor.saturating_sub(1);
@@ -349,6 +363,57 @@ mod tests {
         assert_eq!(r.len(), 6);
         assert!(r.frames().all(|f| !f.projected));
         assert_eq!(r.frames().next().unwrap().captured_at, frame(0).captured_at);
+    }
+
+    /// Observations and forecasts come from independent tasks, so a volume can
+    /// arrive after a forecast batch while being older than every frame in it.
+    #[test]
+    fn frames_are_ordered_by_time_regardless_of_arrival_order() {
+        let mut r = FrameRing::new(16);
+        r.push(projected_frame(100));
+        r.push(projected_frame(115));
+        r.push(frame(10));
+        r.push(frame(5));
+
+        let times: Vec<_> = r.frames().map(|f| f.captured_at).collect();
+        assert!(times.windows(2).all(|w| w[0] <= w[1]), "not chronological: {times:?}");
+        assert_eq!(times[0], frame(5).captured_at);
+        assert_eq!(times[3], projected_frame(115).captured_at);
+    }
+
+    #[test]
+    fn a_late_observation_does_not_land_after_the_forecast() {
+        let mut r = FrameRing::new(16);
+        for i in 0..3 {
+            r.push(frame(i));
+        }
+        r.push(projected_frame(60));
+        r.push(frame(3));
+
+        let kinds: Vec<bool> = r.frames().map(|f| f.projected).collect();
+        assert_eq!(kinds, vec![false, false, false, false, true]);
+    }
+
+    #[test]
+    fn inserting_before_the_cursor_keeps_it_on_the_same_frame() {
+        let mut r = FrameRing::new(16);
+        r.push(frame(10));
+        r.push(frame(20));
+        r.jump_oldest();
+        let held = r.current().unwrap().captured_at;
+        r.push(frame(5));
+        assert_eq!(r.current().unwrap().captured_at, held, "cursor must not drift");
+    }
+
+    #[test]
+    fn dropping_projections_still_works_with_ordered_insertion() {
+        let mut r = FrameRing::new(16);
+        r.push(projected_frame(90));
+        r.push(frame(1));
+        r.push(projected_frame(75));
+        r.drop_projected();
+        assert_eq!(r.len(), 1);
+        assert!(r.frames().all(|f| !f.projected));
     }
 
     #[test]
