@@ -3,7 +3,7 @@
 //! Frames hold the polar field rather than a rasterised grid, so panning and
 //! zooming re-sample the original data instead of stretching pixels.
 
-use crate::radar::ReflectivityField;
+use crate::radar::RadarField;
 use chrono::{DateTime, Utc};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -11,7 +11,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct RadarFrame {
     pub captured_at: DateTime<Utc>,
-    pub field: Arc<dyn ReflectivityField>,
+    pub field: Arc<dyn RadarField>,
     /// True for HRRR model output, false for observed NEXRAD. The display must
     /// keep these distinguishable so a prediction is never read as a
     /// measurement.

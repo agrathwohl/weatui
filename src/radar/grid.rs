@@ -5,7 +5,7 @@
 //! arithmetic rather than a full projection.
 
 use crate::geo::Coords;
-use crate::radar::{DbzGrid, ReflectivityField};
+use crate::radar::{DbzGrid, RadarField, RadarProduct};
 
 const KM_PER_DEG_LAT: f64 = 111.19492664455873;
 
@@ -94,11 +94,19 @@ impl Viewport {
     }
 }
 
-pub fn rasterize(field: &dyn ReflectivityField, viewport: &Viewport) -> DbzGrid {
+pub fn rasterize(field: &dyn RadarField, viewport: &Viewport) -> DbzGrid {
+    rasterize_product(field, viewport, RadarProduct::Reflectivity)
+}
+
+pub fn rasterize_product(
+    field: &dyn RadarField,
+    viewport: &Viewport,
+    product: RadarProduct,
+) -> DbzGrid {
     let mut grid = DbzGrid::new(viewport.width, viewport.height);
     for y in 0..viewport.height {
         for x in 0..viewport.width {
-            grid.set(x, y, field.dbz_at(viewport.pixel_coords(x, y)));
+            grid.set(x, y, field.value_at(viewport.pixel_coords(x, y), product));
         }
     }
     grid

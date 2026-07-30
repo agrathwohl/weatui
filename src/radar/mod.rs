@@ -11,16 +11,97 @@ pub mod ring;
 
 use crate::geo::Coords;
 
-/// A field of reflectivity that can be sampled anywhere.
+/// A selectable radar moment.
+///
+/// A forecast grid only carries reflectivity, so `supports` lets the display
+/// tell "this product is empty here" apart from "this source cannot produce
+/// this product at all".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RadarProduct {
+    Reflectivity,
+    Velocity,
+    CorrelationCoefficient,
+    DifferentialReflectivity,
+    SpectrumWidth,
+}
+
+impl RadarProduct {
+    pub const ALL: &'static [RadarProduct] = &[
+        RadarProduct::Reflectivity,
+        RadarProduct::Velocity,
+        RadarProduct::CorrelationCoefficient,
+        RadarProduct::DifferentialReflectivity,
+        RadarProduct::SpectrumWidth,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RadarProduct::Reflectivity => "reflectivity",
+            RadarProduct::Velocity => "velocity",
+            RadarProduct::CorrelationCoefficient => "corr coeff",
+            RadarProduct::DifferentialReflectivity => "diff refl",
+            RadarProduct::SpectrumWidth => "spectrum width",
+        }
+    }
+
+    pub fn units(self) -> &'static str {
+        match self {
+            RadarProduct::Reflectivity => "dBZ",
+            RadarProduct::Velocity => "m/s",
+            RadarProduct::CorrelationCoefficient => "",
+            RadarProduct::DifferentialReflectivity => "dB",
+            RadarProduct::SpectrumWidth => "m/s",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        let all = Self::ALL;
+        let i = all.iter().position(|p| *p == self).unwrap_or(0);
+        all[(i + 1) % all.len()]
+    }
+
+    /// How a column of elevation cuts collapses to one value.
+    ///
+    /// Not uniform across products. Reflectivity takes the column maximum
+    /// because that is composite reflectivity, which is what HRRR forecasts.
+    /// Correlation takes the minimum, because a debris signature is a
+    /// *collapse* in correlation and averaging would erase it. Velocity and
+    /// differential reflectivity come from the lowest cut, since near-ground
+    /// rotation and drop shape are what matter and aloft values would mask
+    /// them.
+    pub fn reduction(self) -> ColumnReduction {
+        match self {
+            RadarProduct::Reflectivity | RadarProduct::SpectrumWidth => ColumnReduction::Max,
+            RadarProduct::CorrelationCoefficient => ColumnReduction::Min,
+            RadarProduct::Velocity | RadarProduct::DifferentialReflectivity => {
+                ColumnReduction::LowestCut
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnReduction {
+    Max,
+    Min,
+    LowestCut,
+}
+
+/// A radar field that can be sampled anywhere for any supported moment.
 ///
 /// Deliberately carries no site or range: those are properties of a radar, and
 /// an HRRR forecast grid has neither. Keeping them here forced the forecast
 /// implementation to invent values, which is how a caller ends up drawing
 /// coverage geometry for something that has no coverage.
-pub trait ReflectivityField: Send + Sync {
-    fn dbz_at(&self, at: Coords) -> Option<f32>;
+pub trait RadarField: Send + Sync {
+    fn value_at(&self, at: Coords, product: RadarProduct) -> Option<f32>;
+    fn supports(&self, product: RadarProduct) -> bool;
     fn source_label(&self) -> &str;
     fn elevation_degrees(&self) -> f32;
+
+    fn dbz_at(&self, at: Coords) -> Option<f32> {
+        self.value_at(at, RadarProduct::Reflectivity)
+    }
 }
 
 /// A rectangular half-block pixel grid. `height` counts pixels, so a terminal
@@ -74,13 +155,20 @@ pub(crate) mod testing {
         pub dbz: f32,
     }
 
-    impl ReflectivityField for DiskField {
-        fn dbz_at(&self, at: Coords) -> Option<f32> {
+    impl RadarField for DiskField {
+        fn value_at(&self, at: Coords, product: RadarProduct) -> Option<f32> {
+            if product != RadarProduct::Reflectivity {
+                return None;
+            }
             if crate::geo::haversine_km(self.centre, at) <= self.radius_km {
                 Some(self.dbz)
             } else {
                 None
             }
+        }
+
+        fn supports(&self, product: RadarProduct) -> bool {
+            product == RadarProduct::Reflectivity
         }
         fn source_label(&self) -> &str {
             "TEST"

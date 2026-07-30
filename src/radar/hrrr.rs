@@ -12,7 +12,7 @@
 //! rather than the whole multi-megabyte file.
 
 use crate::geo::Coords;
-use crate::radar::ReflectivityField;
+use crate::radar::{RadarField, RadarProduct};
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Duration, Timelike, Utc};
 use grib::GridDefinitionTemplateValues;
@@ -208,8 +208,15 @@ impl HrrrField {
     }
 }
 
-impl ReflectivityField for HrrrField {
-    fn dbz_at(&self, at: Coords) -> Option<f32> {
+impl RadarField for HrrrField {
+    fn supports(&self, product: RadarProduct) -> bool {
+        product == RadarProduct::Reflectivity
+    }
+
+    fn value_at(&self, at: Coords, product: RadarProduct) -> Option<f32> {
+        if product != RadarProduct::Reflectivity {
+            return None;
+        }
         let v = *self.values.get(self.grid.index_of(at)?)?;
         v.is_finite().then_some(v)
     }
@@ -583,6 +590,116 @@ mod tests {
 
     /// Verified against the live bucket: f00 is the analysis and holds no
     /// forecast, f01 carries 15 through 60, f02 carries 75 through 120.
+    /// Proves the projection actually lands on the data, not merely somewhere
+    /// plausible. The raw array's maximum is known; sweeping CONUS through
+    /// `dbz_at` must rediscover a comparable value. If indexing were wrong the
+    /// sweep would find nothing while the array is full of echo.
+    /// `cargo test hrrr_sampling_finds -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn hrrr_sampling_finds_the_echo_present_in_the_raw_array() {
+        let client = reqwest::Client::builder()
+            .user_agent(crate::alert::poll::USER_AGENT)
+            .build()
+            .unwrap();
+        let cycle = latest_cycle(&client, Utc::now()).await.expect("cycle");
+        let field = fetch_step(&client, cycle, ForecastStep::new(60)).await.expect("fetch");
+
+        let raw_max = field.values.iter().copied().filter(|v| v.is_finite()).fold(f32::MIN, f32::max);
+        let raw_echo = field.values.iter().filter(|v| **v > 5.0).count();
+        eprintln!("raw: max {raw_max:.1} dBZ, {raw_echo} cells above 5 dBZ");
+
+        let mut sampled_max = f32::MIN;
+        let mut sampled_echo = 0usize;
+        let mut inside = 0usize;
+        let mut lat = 25.0;
+        while lat < 49.0 {
+            let mut lon = -124.0;
+            while lon < -67.0 {
+                if let Some(v) = field.dbz_at(Coords { lat, lon }) {
+                    inside += 1;
+                    sampled_max = sampled_max.max(v);
+                    if v > 5.0 {
+                        sampled_echo += 1;
+                    }
+                }
+                lon += 0.1;
+            }
+            lat += 0.1;
+        }
+        eprintln!(
+            "sampled: {inside} points inside grid, max {sampled_max:.1} dBZ, {sampled_echo} above 5"
+        );
+
+        assert!(inside > 100_000, "projection barely lands inside the grid: {inside}");
+        assert!(
+            sampled_max > raw_max - 10.0,
+            "sweep found max {sampled_max:.1} but the array holds {raw_max:.1}; indexing is wrong"
+        );
+        if raw_echo > 1000 {
+            assert!(
+                sampled_echo > 0,
+                "array has {raw_echo} echo cells but sampling found none"
+            );
+        }
+    }
+
+    /// Compares what the radar sees against what the model forecasts over the
+    /// same patch, which is the only way to tell a projection bug from the two
+    /// products genuinely disagreeing.
+    /// `cargo test compare_observed -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn compare_observed_and_forecast_over_the_same_area() {
+        let home = Coords { lat: 35.9527, lon: -87.3085 };
+        let client = reqwest::Client::builder()
+            .user_agent(crate::alert::poll::USER_AGENT)
+            .build()
+            .unwrap();
+
+        let (observed_at, nexrad) = crate::radar::fetch::latest_field("KOHX").await.expect("KOHX");
+        let cycle = latest_cycle(&client, Utc::now()).await.expect("cycle");
+        let forecast = fetch_step(&client, cycle, ForecastStep::new(60)).await.expect("fetch");
+
+        let mut n_vals = Vec::new();
+        let mut h_vals = Vec::new();
+        let mut lat = home.lat - 1.5;
+        while lat < home.lat + 1.5 {
+            let mut lon = home.lon - 1.5;
+            while lon < home.lon + 1.5 {
+                let at = Coords { lat, lon };
+                if let Some(v) = nexrad.dbz_at(at) {
+                    n_vals.push(v);
+                }
+                if let Some(v) = forecast.dbz_at(at) {
+                    h_vals.push(v);
+                }
+                lon += 0.02;
+            }
+            lat += 0.02;
+        }
+
+        let describe = |name: &str, v: &[f32]| {
+            let above = |t: f32| v.iter().filter(|x| **x > t).count();
+            eprintln!(
+                "{name:>8}: n={} min={:.1} max={:.1} | >5dBZ {} | >20dBZ {} | >35dBZ {}",
+                v.len(),
+                v.iter().copied().fold(f32::INFINITY, f32::min),
+                v.iter().copied().fold(f32::NEG_INFINITY, f32::max),
+                above(5.0),
+                above(20.0),
+                above(35.0),
+            );
+        };
+        eprintln!(
+            "observed {observed_at}, cycle {cycle}, lead 60min | tilts={} dual_pol={}",
+            nexrad.tilt_count(),
+            nexrad.has_dual_pol()
+        );
+        describe("NEXRAD", &n_vals);
+        describe("HRRR", &h_vals);
+    }
+
     #[test]
     fn leads_map_onto_the_published_file_layout() {
         for (lead, expected_file) in [

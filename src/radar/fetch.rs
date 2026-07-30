@@ -5,7 +5,7 @@
 //! answer per-pixel queries, which preserves full resolution under zoom.
 
 use crate::geo::Coords;
-use crate::radar::ReflectivityField;
+use crate::radar::{ColumnReduction, RadarField, RadarProduct};
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Duration, Utc};
 use nexrad::data::aws::archive::{Identifier, download_file, list_files};
@@ -17,53 +17,149 @@ use nexrad::model::geo::{GeoPoint, RadarCoordinateSystem};
 
 const MAX_CHUNKS_PER_VOLUME: usize = 100;
 
+/// Below this, a return is not precipitation. Dual-pol correlation coefficient
+/// measures how alike the horizontal and vertical returns are: rain, snow and
+/// hail are near 1.0, while insects, birds, chaff and ground clutter scatter
+/// irregularly and collapse toward 0. Filtering on intensity instead would
+/// keep dense bug swarms and discard genuine drizzle.
+pub const DEFAULT_MIN_CORRELATION: f32 = 0.90;
+
+/// One elevation cut and every moment it carries.
+struct Tilt {
+    elevation: f32,
+    reflectivity: SweepField,
+    velocity: Option<SweepField>,
+    correlation: Option<SweepField>,
+    differential_reflectivity: Option<SweepField>,
+    spectrum_width: Option<SweepField>,
+}
+
+impl Tilt {
+    fn moment(&self, product: RadarProduct) -> Option<&SweepField> {
+        match product {
+            RadarProduct::Reflectivity => Some(&self.reflectivity),
+            RadarProduct::Velocity => self.velocity.as_ref(),
+            RadarProduct::CorrelationCoefficient => self.correlation.as_ref(),
+            RadarProduct::DifferentialReflectivity => self.differential_reflectivity.as_ref(),
+            RadarProduct::SpectrumWidth => self.spectrum_width.as_ref(),
+        }
+    }
+}
+
+/// Composite reflectivity: the strongest echo anywhere in the column.
+///
+/// Deliberately not base reflectivity from the lowest tilt. HRRR publishes
+/// REFC, the column maximum, so sampling a single cut would make the observed
+/// and forecast halves of the timeline show different quantities and jump at
+/// the boundary.
 pub struct NexradField {
     site_id: String,
     system: RadarCoordinateSystem,
-    field: SweepField,
+    tilts: Vec<Tilt>,
+    lowest_elevation: f32,
+    min_correlation: f32,
 }
 
 impl NexradField {
-
-    /// Base reflectivity is the lowest tilt that actually carries a
-    /// reflectivity moment; higher tilts overshoot low-level storm structure.
     pub fn from_scan(scan: &Scan) -> Result<Self> {
+        Self::from_scan_with(scan, DEFAULT_MIN_CORRELATION)
+    }
+
+    pub fn from_scan_with(scan: &Scan, min_correlation: f32) -> Result<Self> {
         let site = scan
             .site()
             .context("scan carries no site metadata, cannot georeference it")?;
 
-        let sweep = scan
-            .sweeps()
-            .iter()
-            .filter(|s| s.radials().iter().any(|r| r.reflectivity().is_some()))
-            .min_by(|a, b| {
-                a.elevation_angle_degrees()
-                    .unwrap_or(f32::MAX)
-                    .total_cmp(&b.elevation_angle_degrees().unwrap_or(f32::MAX))
-            })
-            .context("scan contains no sweep with reflectivity data")?;
+        let mut tilts: Vec<Tilt> = Vec::new();
+        let mut lowest_elevation = f32::MAX;
+        for sweep in scan.sweeps() {
+            if !sweep.radials().iter().any(|r| r.reflectivity().is_some()) {
+                continue;
+            }
+            let Some(reflectivity) =
+                SweepField::from_radials(sweep.radials(), Product::Reflectivity)
+            else {
+                continue;
+            };
+            let elevation = reflectivity.elevation_degrees();
+            lowest_elevation = lowest_elevation.min(elevation);
+            let build = |p| SweepField::from_radials(sweep.radials(), p);
+            tilts.push(Tilt {
+                elevation,
+                reflectivity,
+                velocity: build(Product::Velocity),
+                correlation: build(Product::CorrelationCoefficient),
+                differential_reflectivity: build(Product::DifferentialReflectivity),
+                spectrum_width: build(Product::SpectrumWidth),
+            });
+        }
 
-        let field = SweepField::from_radials(sweep.radials(), Product::Reflectivity)
-            .ok_or_else(|| anyhow!("could not build a reflectivity field from the sweep"))?;
+        if tilts.is_empty() {
+            anyhow::bail!("scan contains no sweep with reflectivity data");
+        }
+        tilts.sort_by(|a, b| a.elevation.total_cmp(&b.elevation));
 
         Ok(NexradField {
             site_id: site.identifier_string(),
             system: RadarCoordinateSystem::new(site),
-            field,
+            tilts,
+            lowest_elevation,
+            min_correlation,
         })
+    }
+
+    /// The clutter mask applies to reflectivity only. Correlation coefficient
+    /// must stay unmasked or it could never show the low values that are the
+    /// entire reason to look at it, and masking velocity would hide rotation
+    /// inside a debris ball.
+    fn tilt_value(&self, tilt: &Tilt, at: Coords, product: RadarProduct) -> Option<f32> {
+        let polar = self.system.geo_to_polar(
+            GeoPoint { latitude: at.lat, longitude: at.lon },
+            tilt.elevation,
+        );
+        let (value, status) = tilt
+            .moment(product)?
+            .value_at_polar(polar.azimuth_degrees, polar.range_km)?;
+        if !matches!(status, GateStatus::Valid) {
+            return None;
+        }
+
+        if product == RadarProduct::Reflectivity
+            && let Some(cc) = &tilt.correlation
+            && let Some((rho, cc_status)) =
+                cc.value_at_polar(polar.azimuth_degrees, polar.range_km)
+            && matches!(cc_status, GateStatus::Valid)
+            && rho < self.min_correlation
+        {
+            return None;
+        }
+        Some(value)
+    }
+
+    pub fn tilt_count(&self) -> usize {
+        self.tilts.len()
+    }
+
+    pub fn has_dual_pol(&self) -> bool {
+        self.tilts.iter().any(|t| t.correlation.is_some())
     }
 }
 
-impl ReflectivityField for NexradField {
-    fn dbz_at(&self, at: Coords) -> Option<f32> {
-        let polar = self.system.geo_to_polar(
-            GeoPoint { latitude: at.lat, longitude: at.lon },
-            self.field.elevation_degrees(),
-        );
-        let (value, status) = self
-            .field
-            .value_at_polar(polar.azimuth_degrees, polar.range_km)?;
-        matches!(status, GateStatus::Valid).then_some(value)
+impl RadarField for NexradField {
+    fn value_at(&self, at: Coords, product: RadarProduct) -> Option<f32> {
+        let mut values = self
+            .tilts
+            .iter()
+            .filter_map(|tilt| self.tilt_value(tilt, at, product));
+        match product.reduction() {
+            ColumnReduction::Max => values.reduce(f32::max),
+            ColumnReduction::Min => values.reduce(f32::min),
+            ColumnReduction::LowestCut => values.next(),
+        }
+    }
+
+    fn supports(&self, product: RadarProduct) -> bool {
+        self.tilts.iter().any(|t| t.moment(product).is_some())
     }
 
     fn source_label(&self) -> &str {
@@ -71,7 +167,7 @@ impl ReflectivityField for NexradField {
     }
 
     fn elevation_degrees(&self) -> f32 {
-        self.field.elevation_degrees()
+        self.lowest_elevation
     }
 }
 

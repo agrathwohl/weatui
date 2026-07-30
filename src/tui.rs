@@ -5,9 +5,9 @@ use crate::config::{Colormap, Config};
 use crate::daemon::AlertEngine;
 use crate::geo::{Coords, RadarSite, nearest_radar_site, radar_site_by_id};
 use crate::notify;
-use crate::radar::grid::{Viewport, rasterize};
+use crate::radar::grid::{Viewport, rasterize_product};
 use crate::radar::ring::{FrameRing, RadarFrame};
-use crate::radar::{ReflectivityField, fetch};
+use crate::radar::{RadarField, RadarProduct, fetch};
 use crate::render::hud::Hud;
 use crate::render::overlay::{
     HOME_MARKER, LETHAL_OUTLINE, PixelOverlay, DISTANCE_RING, SEVERE_OUTLINE, WATCH_OUTLINE,
@@ -92,9 +92,16 @@ impl ForecastHorizon {
     }
 }
 
+/// Shifted digits on a US layout. Matching the character rather than the
+/// SHIFT modifier keeps this working on terminals that report shifted digits
+/// without setting the modifier bit.
+const SHIFTED_DIGITS: [char; 9] = ['!', '@', '#', '$', '%', '^', '&', '*', '('];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     CycleForecast,
+    SelectProduct(usize),
+    ToggleProductOverlay(usize),
     PanWest,
     PanSouth,
     PanNorth,
@@ -151,6 +158,12 @@ pub fn resolve_key(pending: &mut Option<char>, key: KeyEvent) -> Action {
         KeyCode::Char('>') => Action::Faster,
         KeyCode::Char('<') => Action::Slower,
         KeyCode::Char('f') => Action::CycleForecast,
+        KeyCode::Char(c @ '1'..='9') => {
+            Action::SelectProduct(c.to_digit(10).unwrap_or(1) as usize - 1)
+        }
+        KeyCode::Char(c) if SHIFTED_DIGITS.contains(&c) => Action::ToggleProductOverlay(
+            SHIFTED_DIGITS.iter().position(|s| *s == c).unwrap_or(0),
+        ),
         KeyCode::Char('?') => Action::ToggleHelp,
         KeyCode::Char('q') | KeyCode::Esc => Action::Quit,
         KeyCode::Char(c @ ('g' | 'z' | 'Z')) => {
@@ -173,6 +186,8 @@ pub struct App {
     tz: chrono_tz::Tz,
     pending: Option<char>,
     playback: Duration,
+    product: RadarProduct,
+    product_overlays: Vec<RadarProduct>,
     horizon: ForecastHorizon,
     horizon_tx: Option<tokio::sync::watch::Sender<ForecastHorizon>>,
     show_help: bool,
@@ -204,6 +219,8 @@ impl App {
             tz,
             pending: None,
             playback: Duration::from_millis(450),
+            product: RadarProduct::Reflectivity,
+            product_overlays: Vec::new(),
             horizon: ForecastHorizon::Near,
             horizon_tx: None,
             show_help: false,
@@ -242,6 +259,33 @@ impl App {
             }
             Action::Slower => {
                 self.playback = self.playback.mul_f64(1.4).min(Duration::from_millis(4000))
+            }
+            Action::SelectProduct(i) => {
+                if let Some(p) = RadarProduct::ALL.get(i).copied() {
+                    self.product = p;
+                    self.status = format!("base layer: {} ({})", p.label(), p.units());
+                }
+            }
+            Action::ToggleProductOverlay(i) => {
+                if let Some(p) = RadarProduct::ALL.get(i).copied() {
+                    if let Some(at) = self.product_overlays.iter().position(|q| *q == p) {
+                        self.product_overlays.remove(at);
+                    } else {
+                        self.product_overlays.push(p);
+                    }
+                    self.status = if self.product_overlays.is_empty() {
+                        "overlays: none".to_string()
+                    } else {
+                        format!(
+                            "overlays: {}",
+                            self.product_overlays
+                                .iter()
+                                .map(|p| p.label())
+                                .collect::<Vec<_>>()
+                                .join(" + ")
+                        )
+                    };
+                }
             }
             Action::CycleForecast => {
                 self.horizon = self.horizon.next();
@@ -294,7 +338,7 @@ impl App {
 
         let overlay = self.build_overlay(self.viewport.width, self.viewport.height);
         let grid = match self.ring.current() {
-            Some(f) => rasterize(f.field.as_ref(), &self.viewport),
+            Some(f) => rasterize_product(f.field.as_ref(), &self.viewport, self.product),
             None => crate::radar::DbzGrid::new(self.viewport.width, self.viewport.height),
         };
 
@@ -368,7 +412,7 @@ struct AlertSnapshot {
 
 struct RadarUpdate {
     observed_at: chrono::DateTime<chrono::Utc>,
-    field: Box<dyn ReflectivityField>,
+    field: Box<dyn RadarField>,
     /// `Some` while history is still loading, carrying "n/total" for the
     /// status line. Projections are suppressed until it is `None`.
     backfill: Option<String>,
@@ -376,7 +420,7 @@ struct RadarUpdate {
 
 struct ForecastUpdate {
     valid_at: chrono::DateTime<chrono::Utc>,
-    field: Box<dyn ReflectivityField>,
+    field: Box<dyn RadarField>,
     lead_minutes: i64,
     /// Marks the start of a batch so the ring can retire the previous
     /// forecast before the replacement lands, rather than interleaving two.
@@ -587,7 +631,7 @@ async fn event_loop(
                     };
                 }
                 Update::Radar(Ok(RadarUpdate { observed_at, field, backfill })) => {
-                    let observed: Arc<dyn ReflectivityField> = Arc::from(field);
+                    let observed: Arc<dyn RadarField> = Arc::from(field);
                     let tilt = observed.elevation_degrees();
                     app.ring.push(RadarFrame {
                         captured_at: observed_at,
@@ -757,7 +801,63 @@ mod tests {
     #[test]
     fn unbound_keys_are_ignored_rather_than_mapped_to_something_surprising() {
         assert_eq!(press(&[key('x')]), Action::Ignored);
-        assert_eq!(press(&[key('5')]), Action::Ignored);
+        assert_eq!(press(&[key('~')]), Action::Ignored);
+    }
+
+    #[test]
+    fn digits_select_the_base_product() {
+        assert_eq!(press(&[key('1')]), Action::SelectProduct(0));
+        assert_eq!(press(&[key('5')]), Action::SelectProduct(4));
+        assert_eq!(press(&[key('9')]), Action::SelectProduct(8));
+    }
+
+    /// Shifted digits toggle an additive overlay rather than replacing the base,
+    /// so several products can be on screen at once.
+    #[test]
+    fn shifted_digits_toggle_overlays_on_the_matching_product() {
+        assert_eq!(press(&[key('!')]), Action::ToggleProductOverlay(0));
+        assert_eq!(press(&[key('$')]), Action::ToggleProductOverlay(3));
+        assert_eq!(press(&[key('(')]), Action::ToggleProductOverlay(8));
+    }
+
+    #[test]
+    fn a_digit_and_its_shifted_form_address_the_same_product() {
+        for (plain, shifted) in "123456789".chars().zip(SHIFTED_DIGITS) {
+            let base = match press(&[key(plain)]) {
+                Action::SelectProduct(i) => i,
+                other => panic!("{plain} gave {other:?}"),
+            };
+            let overlay = match press(&[key(shifted)]) {
+                Action::ToggleProductOverlay(i) => i,
+                other => panic!("{shifted} gave {other:?}"),
+            };
+            assert_eq!(base, overlay, "{plain} and {shifted} must be the same product");
+        }
+    }
+
+    #[test]
+    fn selecting_a_product_beyond_the_list_is_a_no_op() {
+        let cfg = crate::config::Config::parse("[location]\nzip = \"73019\"\n", "/tmp/c.toml").unwrap();
+        let mut app =
+            App::new(&cfg, Coords { lat: 35.2, lon: -97.4 }, chrono_tz::UTC).unwrap();
+        app.apply(Action::SelectProduct(0));
+        assert_eq!(app.product, RadarProduct::Reflectivity);
+        app.apply(Action::SelectProduct(99));
+        assert_eq!(app.product, RadarProduct::Reflectivity, "out of range must not change it");
+    }
+
+    #[test]
+    fn overlay_toggling_adds_then_removes() {
+        let cfg = crate::config::Config::parse("[location]\nzip = \"73019\"\n", "/tmp/c.toml").unwrap();
+        let mut app =
+            App::new(&cfg, Coords { lat: 35.2, lon: -97.4 }, chrono_tz::UTC).unwrap();
+        assert!(app.product_overlays.is_empty());
+        app.apply(Action::ToggleProductOverlay(1));
+        assert_eq!(app.product_overlays, vec![RadarProduct::Velocity]);
+        app.apply(Action::ToggleProductOverlay(2));
+        assert_eq!(app.product_overlays.len(), 2);
+        app.apply(Action::ToggleProductOverlay(1));
+        assert_eq!(app.product_overlays, vec![RadarProduct::CorrelationCoefficient]);
     }
 
     #[test]
