@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.104"
 chrono = "0.4.45"
+chrono-tz = "0.10.4"
 nexrad = { version = "1.0.0-rc.4", default-features = false, features = ["aws-polling", "decode", "model", "chrono"] }
 ratatui = "0.30.2"
 reqwest = { version = "0.13.4", features = ["json", "gzip"] }

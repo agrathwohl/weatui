@@ -126,6 +126,7 @@ pub struct App {
     home: Coords,
     site: RadarSite,
     colormap: Colormap,
+    tz: chrono_tz::Tz,
     pending: Option<char>,
     playback: Duration,
     show_help: bool,
@@ -134,7 +135,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cfg: &Config, home: Coords) -> Result<Self> {
+    pub fn new(cfg: &Config, home: Coords, tz: chrono_tz::Tz) -> Result<Self> {
         let site = if cfg.radar.site.eq_ignore_ascii_case("auto") {
             nearest_radar_site(home).context("no WSR-88D site could be selected")?
         } else {
@@ -154,6 +155,7 @@ impl App {
             home,
             site,
             colormap: cfg.render.colormap,
+            tz,
             pending: None,
             playback: Duration::from_millis(450),
             show_help: false,
@@ -252,7 +254,7 @@ impl App {
             RadarRaster { grid: &grid, overlay: Some(&overlay), colormap: self.colormap },
             map,
         );
-        frame.render_widget(Timeline { ring: &self.ring }, rows[1]);
+        frame.render_widget(Timeline { ring: &self.ring, tz: self.tz }, rows[1]);
         frame.render_widget(
             Paragraph::new(self.status.clone())
                 .style(Style::default().fg(Color::Rgb(130, 130, 140))),
@@ -271,6 +273,7 @@ impl App {
                 site: self.site.id,
                 home: self.home,
                 peak_dbz: grid.value_range().map(|(_, hi)| hi),
+                tz: self.tz,
                 eta_for: &eta,
             },
             columns[1],
@@ -356,7 +359,15 @@ enum Update {
 }
 
 pub async fn run(cfg: Config, home: Coords) -> Result<()> {
-    let mut app = App::new(&cfg, home)?;
+    // Falling back to the machine's own zone would be a silent lie whenever the
+    // configured location is somewhere else, so a failed lookup shows UTC and
+    // says so via the %Z abbreviation.
+    let tz = match crate::geo::timezone_for(home).await {
+        Ok(tz) => tz,
+        Err(_) => chrono_tz::UTC,
+    };
+
+    let mut app = App::new(&cfg, home, tz)?;
     let site_id = app.site.id.to_string();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Update>(16);

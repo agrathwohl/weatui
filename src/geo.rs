@@ -7,7 +7,8 @@
 //! - ZCTA centroids: US Census 2023 national gazetteer, GEOID/INTPTLAT/INTPTLONG.
 //! - WSR-88D sites: api.weather.gov/radar/stations?stationType=WSR-88D.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
+use chrono_tz::Tz;
 use std::sync::OnceLock;
 
 const ZCTA_CSV: &str = include_str!("data/zcta_centroids.csv");
@@ -99,6 +100,49 @@ pub fn nearest_radar_site(from: Coords) -> Option<RadarSite> {
         .map(|(id, c)| (RadarSite { id, coords: *c }, haversine_km(from, *c)))
         .min_by(|x, y| x.1.total_cmp(&y.1))
         .map(|(site, _)| site)
+}
+
+/// The IANA zone NWS assigns to these coordinates.
+///
+/// Displayed times must follow the configured location rather than the machine
+/// or the issuing office. An alert for Tennessee can be published by an office
+/// on Mountain time, and its `expires` carries that office's offset, so the
+/// only coherent basis is the zone of the place being watched.
+pub async fn timezone_for(at: Coords) -> Result<Tz> {
+    #[derive(serde::Deserialize)]
+    struct Points {
+        properties: Properties,
+    }
+    #[derive(serde::Deserialize)]
+    struct Properties {
+        #[serde(rename = "timeZone")]
+        time_zone: String,
+    }
+
+    let url = format!(
+        "https://api.weather.gov/points/{:.4},{:.4}",
+        at.lat, at.lon
+    );
+    let points: Points = reqwest::Client::builder()
+        .user_agent(crate::alert::poll::USER_AGENT)
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .context("failed to build HTTP client for the timezone lookup")?
+        .get(&url)
+        .send()
+        .await
+        .with_context(|| format!("timezone lookup failed for {url}"))?
+        .error_for_status()
+        .context("timezone lookup returned an error status")?
+        .json()
+        .await
+        .context("timezone lookup returned unexpected JSON")?;
+
+    points
+        .properties
+        .time_zone
+        .parse()
+        .map_err(|_| anyhow::anyhow!("{:?} is not a known IANA zone", points.properties.time_zone))
 }
 
 pub fn radar_site_by_id(id: &str) -> Option<RadarSite> {

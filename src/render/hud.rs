@@ -41,6 +41,7 @@ pub struct Hud<'a> {
     pub site: &'a str,
     pub home: crate::geo::Coords,
     pub peak_dbz: Option<f32>,
+    pub tz: chrono_tz::Tz,
     pub eta_for: &'a dyn Fn(&crate::alert::Alert) -> Option<i64>,
 }
 
@@ -147,7 +148,7 @@ impl Hud<'_> {
                 .expires
                 .as_deref()
                 .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-                .map(|t| t.format("%H:%M").to_string());
+                .map(|t| t.with_timezone(&self.tz).format("%H:%M %Z").to_string());
             lines.push(Line::from(Span::styled(
                 match until {
                     Some(t) => format!("  {} until {t}", certainty.to_lowercase()),
@@ -255,7 +256,7 @@ mod tests {
     fn quiet_hud_says_so_explicitly_rather_than_rendering_blank() {
         let active: Vec<ActiveAlert> = Vec::new();
         let eta = |_: &crate::alert::Alert| None;
-        let hud = Hud { active: &active, stale: false, stale_secs: 0, site: "KOHX", home: crate::geo::Coords { lat: 36.0, lon: -87.0 }, peak_dbz: None, eta_for: &eta };
+        let hud = Hud { active: &active, stale: false, stale_secs: 0, site: "KOHX", home: crate::geo::Coords { lat: 36.0, lon: -87.0 }, peak_dbz: None, tz: chrono_tz::America::Chicago, eta_for: &eta };
         let text: String = hud
             .lines()
             .iter()
@@ -268,7 +269,7 @@ mod tests {
     fn stale_feed_states_plainly_that_warnings_are_not_arriving() {
         let active: Vec<ActiveAlert> = Vec::new();
         let eta = |_: &crate::alert::Alert| None;
-        let hud = Hud { active: &active, stale: true, stale_secs: 420, site: "KOHX", home: crate::geo::Coords { lat: 36.0, lon: -87.0 }, peak_dbz: None, eta_for: &eta };
+        let hud = Hud { active: &active, stale: true, stale_secs: 420, site: "KOHX", home: crate::geo::Coords { lat: 36.0, lon: -87.0 }, peak_dbz: None, tz: chrono_tz::America::Chicago, eta_for: &eta };
         let text: String = hud
             .lines()
             .iter()
@@ -284,7 +285,7 @@ mod tests {
         let eta = |_: &crate::alert::Alert| None;
         let area = Rect::new(0, 0, 20, 5);
         let mut buf = Buffer::empty(area);
-        Hud { active: &active, stale: false, stale_secs: 0, site: "KOHX", home: crate::geo::Coords { lat: 36.0, lon: -87.0 }, peak_dbz: None, eta_for: &eta }
+        Hud { active: &active, stale: false, stale_secs: 0, site: "KOHX", home: crate::geo::Coords { lat: 36.0, lon: -87.0 }, peak_dbz: None, tz: chrono_tz::America::Chicago, eta_for: &eta }
             .render(area, &mut buf);
     }
 }

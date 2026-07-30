@@ -1,4 +1,5 @@
 use crate::radar::ring::FrameRing;
+use chrono_tz::Tz;
 use crate::render::glyph;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -27,7 +28,7 @@ pub fn track(ring: &FrameRing) -> String {
         .collect()
 }
 
-pub fn status_text(ring: &FrameRing) -> String {
+pub fn status_text(ring: &FrameRing, tz: Tz) -> String {
     if ring.is_empty() {
         return format!("{} awaiting first volume", glyph::REFRESH);
     }
@@ -42,13 +43,14 @@ pub fn status_text(ring: &FrameRing) -> String {
     };
     let stamp = ring
         .current()
-        .map(|f| f.captured_at.format("%H:%M:%SZ").to_string())
+        .map(|f| f.captured_at.with_timezone(&tz).format("%H:%M:%S %Z").to_string())
         .unwrap_or_default();
     format!("{transport} {position}{live}  {} {stamp}", glyph::CLOCK)
 }
 
 pub struct Timeline<'a> {
     pub ring: &'a FrameRing,
+    pub tz: Tz,
 }
 
 impl Widget for Timeline<'_> {
@@ -59,7 +61,7 @@ impl Widget for Timeline<'_> {
             Color::Rgb(255, 176, 32)
         };
         let line = Line::from(vec![
-            Span::styled(status_text(self.ring), Style::default().fg(colour)),
+            Span::styled(status_text(self.ring, self.tz), Style::default().fg(colour)),
             Span::raw("  "),
             Span::styled(track(self.ring), Style::default().fg(Color::Rgb(200, 200, 210))),
         ]);
@@ -74,6 +76,7 @@ mod tests {
     use crate::radar::ring::RadarFrame;
     use crate::radar::testing::DiskField;
     use chrono::DateTime;
+    const CT: Tz = chrono_tz::America::Chicago;
     use std::sync::Arc;
 
     fn frame(minute: i64, projected: bool) -> RadarFrame {
@@ -105,7 +108,7 @@ mod tests {
     fn empty_ring_reports_that_it_is_waiting_rather_than_showing_a_false_position() {
         let r = FrameRing::new(4);
         assert_eq!(track(&r), "");
-        assert!(status_text(&r).contains("awaiting"));
+        assert!(status_text(&r, CT).contains("awaiting"));
     }
 
     #[test]
@@ -132,27 +135,27 @@ mod tests {
     #[test]
     fn scrubbing_moves_the_cursor_and_flips_the_live_indicator() {
         let mut r = ring_with(4, 0);
-        assert!(status_text(&r).contains("LIVE"));
+        assert!(status_text(&r, CT).contains("LIVE"));
         r.step_back();
         let t: Vec<char> = track(&r).chars().collect();
         assert_eq!(t[2], CURSOR);
-        assert!(status_text(&r).contains("LOOP"), "playing off-newest is a loop, not a scrub");
+        assert!(status_text(&r, CT).contains("LOOP"), "playing off-newest is a loop, not a scrub");
         r.toggle_play();
-        assert!(status_text(&r).contains("SCRUB"), "paused off-newest is a scrub");
+        assert!(status_text(&r, CT).contains("SCRUB"), "paused off-newest is a scrub");
     }
 
     #[test]
     fn status_reports_position_out_of_total() {
         let r = ring_with(7, 0);
-        assert!(status_text(&r).contains("7/7"), "got: {}", status_text(&r));
+        assert!(status_text(&r, CT).contains("7/7"), "got: {}", status_text(&r, CT));
     }
 
     #[test]
     fn transport_glyph_follows_play_state() {
         let mut r = ring_with(3, 0);
-        assert!(status_text(&r).contains(glyph::PLAY));
+        assert!(status_text(&r, CT).contains(glyph::PLAY));
         r.toggle_play();
-        assert!(status_text(&r).contains(glyph::PAUSE));
+        assert!(status_text(&r, CT).contains(glyph::PAUSE));
     }
 
     #[test]
@@ -160,6 +163,6 @@ mod tests {
         let r = ring_with(5, 1);
         let area = Rect::new(0, 0, 60, 1);
         let mut buf = Buffer::empty(area);
-        Timeline { ring: &r }.render(area, &mut buf);
+        Timeline { ring: &r, tz: CT }.render(area, &mut buf);
     }
 }
