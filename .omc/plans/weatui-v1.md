@@ -401,9 +401,21 @@ Manual observation required for A12 (mako `[urgency=critical]` styling) and A13.
    notification, or only appear in the TUI? Watches fire often and could train you to ignore them.
 3. **Radar site vs. mosaic** — v1 assumes a single nearest WSR-88D. Sites go down for maintenance and
    storms cross coverage boundaries. Multi-site mosaic is deferred; confirm that's acceptable.
-4. **"Upcoming" radar (R3)** — NEXRAD provides observed data only. "Upcoming" requires either
-   extrapolation from storm motion vectors (cheap, honest, ±) or an HRRR/MRMS forecast product
-   (accurate, much heavier). v1 proposes **motion-vector extrapolation, clearly labeled as projected**.
+4. ~~**"Upcoming" radar (R3)**~~ — **RESOLVED, shipped in `9b483b6`.** The plan proposed
+   motion-vector extrapolation as the cheap option. That was wrong: translating the present echo
+   cannot grow, decay or initiate storms, which is most of what matters in the next two hours.
+
+   NOAA publishes the real thing. **HRRR `REFC`** is a 3 km convection-allowing model's own forecast
+   of composite reflectivity, at 15-minute steps out to 18 hours, free and keyless on
+   `s3://noaa-hrrr-bdp-pds`. The `.idx` sidecar makes each step a **220 KB ranged request** rather
+   than a multi-megabyte file, which is what made it viable in a TUI.
+
+   Implemented in `src/radar/hrrr.rs` behind the same `ReflectivityField` trait as NEXRAD, so the
+   renderer, colormap, scrubbing and timeline consume it unchanged. Horizons 2h/6h/18h cycle on `f`.
+   Forecast frames render with a dashed rune and the cursor reads `FCST`, never `LIVE`.
+
+   `AdvectedField` and `mean_storm_motion` were deleted rather than kept alongside, so there is only
+   one notion of "the future" in the codebase.
 
 ---
 

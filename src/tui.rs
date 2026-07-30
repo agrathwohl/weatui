@@ -761,6 +761,66 @@ mod tests {
     }
 
     #[test]
+    fn the_default_horizon_is_two_hours_at_quarter_hour_steps() {
+        let steps = ForecastHorizon::Near.steps();
+        assert_eq!(steps.len(), 8);
+        assert_eq!(steps.first().unwrap().lead_minutes(), 15);
+        assert_eq!(steps.last().unwrap().lead_minutes(), 120);
+    }
+
+    /// Mid splices quarter-hourly and hourly lists, which is where a duplicate
+    /// or out-of-order lead would hide.
+    #[test]
+    fn every_horizon_has_strictly_increasing_distinct_leads() {
+        for horizon in [ForecastHorizon::Near, ForecastHorizon::Mid, ForecastHorizon::Long] {
+            let leads: Vec<i64> = horizon.steps().iter().map(|s| s.lead_minutes()).collect();
+            assert!(!leads.is_empty(), "{horizon:?} produced no steps");
+            assert!(
+                leads.windows(2).all(|w| w[0] < w[1]),
+                "{horizon:?} leads are not strictly increasing: {leads:?}"
+            );
+        }
+    }
+
+    /// The ring is sized for observations plus forecasts, so no horizon may
+    /// exceed the reserved headroom or it would evict observed volumes.
+    #[test]
+    fn no_horizon_exceeds_the_reserved_ring_headroom() {
+        for horizon in [ForecastHorizon::Near, ForecastHorizon::Mid, ForecastHorizon::Long] {
+            let n = horizon.steps().len();
+            assert!(
+                n <= MAX_FORECAST_FRAMES,
+                "{horizon:?} needs {n} frames but only {MAX_FORECAST_FRAMES} are reserved"
+            );
+        }
+    }
+
+    #[test]
+    fn horizons_cycle_back_to_the_start() {
+        let mut h = ForecastHorizon::Near;
+        for _ in 0..3 {
+            h = h.next();
+        }
+        assert_eq!(h, ForecastHorizon::Near);
+    }
+
+    #[test]
+    fn horizon_labels_are_distinct() {
+        let labels: Vec<&str> = [ForecastHorizon::Near, ForecastHorizon::Mid, ForecastHorizon::Long]
+            .iter()
+            .map(|h| h.label())
+            .collect();
+        assert_eq!(labels.len(), 3);
+        assert_ne!(labels[0], labels[1]);
+        assert_ne!(labels[1], labels[2]);
+    }
+
+    #[test]
+    fn f_cycles_the_forecast_horizon() {
+        assert_eq!(press(&[key('f')]), Action::CycleForecast);
+    }
+
+    #[test]
     fn centred_rect_fits_inside_a_small_terminal() {
         let area = Rect::new(0, 0, 20, 6);
         let c = centred(58, 18, area);

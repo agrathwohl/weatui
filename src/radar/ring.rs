@@ -12,8 +12,9 @@ use std::sync::Arc;
 pub struct RadarFrame {
     pub captured_at: DateTime<Utc>,
     pub field: Arc<dyn ReflectivityField>,
-    /// NEXRAD is observed-only. Extrapolated frames must be labelled so the
-    /// display never implies a forecast it did not receive.
+    /// True for HRRR model output, false for observed NEXRAD. The display must
+    /// keep these distinguishable so a prediction is never read as a
+    /// measurement.
     pub projected: bool,
 }
 
