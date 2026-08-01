@@ -18,4 +18,8 @@ pub mod glyph {
     pub const PLAY: char = '\u{f04b}';
     pub const PAUSE: char = '\u{f04c}';
     pub const CLOCK: char = '\u{f017}';
+    pub const THERMOMETER: char = '\u{e350}';
+    pub const HUMIDITY: char = '\u{e373}';
+    pub const RAINDROP: char = '\u{e371}';
+    pub const EYE: char = '\u{f06e}';
 }

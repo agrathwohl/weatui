@@ -6,6 +6,7 @@
 //! vividly as a supercell core wastes the only channel this display has.
 
 use crate::config::Colormap;
+use crate::radar::RadarProduct;
 
 pub type Rgb = (u8, u8, u8);
 
@@ -89,8 +90,126 @@ pub fn dbz_to_rgb(dbz: f32, map: Colormap) -> Option<Rgb> {
     }
 }
 
+#[cfg(test)]
 pub fn cell_rgb(dbz: Option<f32>, map: Colormap) -> Rgb {
     dbz.and_then(|v| dbz_to_rgb(v, map)).unwrap_or(NO_DATA)
+}
+
+/// Inbound green, outbound red, near-zero suppressed. The convention is
+/// universal in radar software and inverting it would turn an inbound gust
+/// front into an apparently receding one.
+/// Storm depth in km. A top above roughly 12 km means a strong updraft, so the
+/// ramp turns hot where the tropopause is being approached.
+const ECHO_TOP_STOPS: &[(f32, Rgb)] = &[
+    (2.0, (60, 90, 150)),
+    (5.0, (60, 150, 200)),
+    (8.0, (90, 200, 140)),
+    (11.0, (230, 220, 70)),
+    (14.0, (255, 130, 40)),
+    (18.0, (255, 70, 70)),
+];
+
+/// Liquid water in the column, kg/m^2. High values with a cold profile are the
+/// classic large-hail signature, so the top of the ramp is deliberately loud.
+const VIL_STOPS: &[(f32, Rgb)] = &[
+    (1.0, (55, 80, 140)),
+    (10.0, (60, 160, 190)),
+    (25.0, (110, 205, 120)),
+    (40.0, (235, 225, 80)),
+    (55.0, (255, 140, 45)),
+    (70.0, (255, 65, 65)),
+];
+
+const VELOCITY_STOPS: &[(f32, Rgb)] = &[
+    (-40.0, (0, 255, 120)),
+    (-25.0, (0, 200, 90)),
+    (-10.0, (0, 130, 60)),
+    (-2.0, (40, 60, 50)),
+    (2.0, (60, 45, 45)),
+    (10.0, (150, 50, 40)),
+    (25.0, (220, 60, 50)),
+    (40.0, (255, 120, 110)),
+];
+
+/// Inverted deliberately: low correlation is the interesting value. A collapse
+/// below about 0.8 under a strong echo is a tornado debris signature, so the
+/// alarming colour belongs at the bottom of this scale rather than the top.
+const CORRELATION_STOPS: &[(f32, Rgb)] = &[
+    (0.20, (255, 40, 40)),
+    (0.60, (255, 140, 40)),
+    (0.80, (230, 220, 60)),
+    (0.90, (90, 160, 200)),
+    (0.97, (60, 110, 190)),
+    (1.05, (40, 70, 150)),
+];
+
+const DIFFERENTIAL_STOPS: &[(f32, Rgb)] = &[
+    (-2.0, (80, 80, 160)),
+    (0.0, (70, 110, 180)),
+    (1.0, (80, 200, 130)),
+    (2.5, (230, 220, 70)),
+    (4.0, (240, 140, 50)),
+    (6.0, (240, 60, 60)),
+];
+
+const SPECTRUM_WIDTH_STOPS: &[(f32, Rgb)] = &[
+    (0.0, (40, 60, 80)),
+    (3.0, (60, 140, 170)),
+    (6.0, (200, 200, 80)),
+    (9.0, (240, 120, 50)),
+    (12.0, (250, 60, 60)),
+];
+
+/// Reflectivity keeps the user's chosen ramp. The other moments have physical
+/// conventions that a preference cannot override without misreading them.
+pub fn product_rgb(value: f32, product: RadarProduct, map: Colormap) -> Option<Rgb> {
+    if !value.is_finite() {
+        return None;
+    }
+    match product {
+        RadarProduct::Reflectivity => dbz_to_rgb(value, map),
+        RadarProduct::Velocity => {
+            if value.abs() < 1.0 {
+                None
+            } else {
+                sample_clamped(VELOCITY_STOPS, value)
+            }
+        }
+        RadarProduct::CorrelationCoefficient => sample_clamped(CORRELATION_STOPS, value),
+        RadarProduct::DifferentialReflectivity => sample_clamped(DIFFERENTIAL_STOPS, value),
+        RadarProduct::SpectrumWidth => sample_clamped(SPECTRUM_WIDTH_STOPS, value),
+        // Below the first stop these mean "no storm here", not "clamp to the
+        // dimmest colour", so they sample rather than clamp.
+        RadarProduct::EchoTop => sample(ECHO_TOP_STOPS, value),
+        RadarProduct::VerticallyIntegratedLiquid => sample(VIL_STOPS, value),
+    }
+}
+
+/// Unlike `sample`, values below the first stop clamp to it rather than
+/// vanishing. Velocity and correlation have no "no echo" floor; a reading
+/// below the scale is still a real measurement.
+fn sample_clamped(stops: &[(f32, Rgb)], value: f32) -> Option<Rgb> {
+    if !value.is_finite() {
+        return None;
+    }
+    let first = stops.first()?;
+    if value <= first.0 {
+        return Some(first.1);
+    }
+    for pair in stops.windows(2) {
+        let (lo_v, lo_rgb) = pair[0];
+        let (hi_v, hi_rgb) = pair[1];
+        if value < hi_v {
+            return Some(lerp(lo_rgb, hi_rgb, (value - lo_v) / (hi_v - lo_v)));
+        }
+    }
+    stops.last().map(|s| s.1)
+}
+
+pub fn product_cell_rgb(value: Option<f32>, product: RadarProduct, map: Colormap) -> Rgb {
+    value
+        .and_then(|v| product_rgb(v, product, map))
+        .unwrap_or(NO_DATA)
 }
 
 #[cfg(test)]
@@ -273,6 +392,121 @@ mod tests {
                 None => println!("   {dbz:>4.0} dBZ  {:>16}  (no echo)", "-"),
             }
         }
+    }
+
+    /// Inbound must be green and outbound red. Inverting this reads a storm
+    /// approaching as one departing, which is the whole point of the product.
+    #[test]
+    fn velocity_is_green_inbound_and_red_outbound() {
+        let inbound = product_rgb(-30.0, RadarProduct::Velocity, Colormap::Threat).unwrap();
+        let outbound = product_rgb(30.0, RadarProduct::Velocity, Colormap::Threat).unwrap();
+        assert!(inbound.1 > inbound.0, "inbound should be green-dominant: {inbound:?}");
+        assert!(outbound.0 > outbound.1, "outbound should be red-dominant: {outbound:?}");
+    }
+
+    #[test]
+    fn velocity_near_zero_is_suppressed_so_the_couplet_stands_out() {
+        assert_eq!(product_rgb(0.0, RadarProduct::Velocity, Colormap::Threat), None);
+        assert_eq!(product_rgb(0.5, RadarProduct::Velocity, Colormap::Threat), None);
+        assert!(product_rgb(5.0, RadarProduct::Velocity, Colormap::Threat).is_some());
+    }
+
+    #[test]
+    fn velocity_beyond_the_scale_clamps_rather_than_vanishing() {
+        let extreme = product_rgb(-120.0, RadarProduct::Velocity, Colormap::Threat);
+        assert_eq!(extreme, product_rgb(-40.0, RadarProduct::Velocity, Colormap::Threat));
+        assert!(extreme.is_some(), "a fast inbound gate is still a measurement");
+    }
+
+    /// Low correlation is the alarming value, not the high one: a collapse
+    /// under strong reflectivity is lofted debris.
+    #[test]
+    fn correlation_puts_the_alarming_colour_at_the_bottom() {
+        let debris = product_rgb(0.4, RadarProduct::CorrelationCoefficient, Colormap::Threat)
+            .unwrap();
+        let rain = product_rgb(0.99, RadarProduct::CorrelationCoefficient, Colormap::Threat)
+            .unwrap();
+        assert!(debris.0 > debris.2, "low CC should be warm: {debris:?}");
+        assert!(rain.2 > rain.0, "high CC should be cool: {rain:?}");
+    }
+
+    #[test]
+    fn every_product_renders_something_across_its_working_range() {
+        for (product, samples) in [
+            (RadarProduct::Reflectivity, vec![10.0, 35.0, 60.0]),
+            (RadarProduct::Velocity, vec![-30.0, -5.0, 5.0, 30.0]),
+            (RadarProduct::CorrelationCoefficient, vec![0.3, 0.85, 0.99]),
+            (RadarProduct::DifferentialReflectivity, vec![-1.0, 1.0, 5.0]),
+            (RadarProduct::SpectrumWidth, vec![1.0, 5.0, 11.0]),
+            (RadarProduct::EchoTop, vec![3.0, 9.0, 15.0]),
+            (RadarProduct::VerticallyIntegratedLiquid, vec![5.0, 30.0, 65.0]),
+        ] {
+            for v in samples {
+                assert!(
+                    product_rgb(v, product, Colormap::Threat).is_some(),
+                    "{product:?} produced nothing at {v}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_product_paints_a_colour_for_a_nan_reading() {
+        for product in RadarProduct::ALL {
+            assert_eq!(product_rgb(f32::NAN, *product, Colormap::Threat), None, "{product:?}");
+            assert_eq!(
+                product_cell_rgb(Some(f32::NAN), *product, Colormap::Threat),
+                NO_DATA
+            );
+            assert_eq!(product_cell_rgb(None, *product, Colormap::Threat), NO_DATA);
+        }
+    }
+
+    /// Reflectivity is the only product whose ramp is a user preference; the
+    /// rest encode physical conventions that a setting must not override.
+    #[test]
+    fn only_reflectivity_responds_to_the_configured_colormap() {
+        let a = product_rgb(30.0, RadarProduct::Reflectivity, Colormap::Threat);
+        let b = product_rgb(30.0, RadarProduct::Reflectivity, Colormap::Nws);
+        assert_ne!(a, b);
+
+        for product in [RadarProduct::Velocity, RadarProduct::CorrelationCoefficient] {
+            let value = if product == RadarProduct::Velocity { 20.0 } else { 0.7 };
+            assert_eq!(
+                product_rgb(value, product, Colormap::Threat),
+                product_rgb(value, product, Colormap::Nws),
+                "{product:?} must ignore the colormap setting"
+            );
+        }
+    }
+
+    /// A clear sky reports echo top 0 m and VIL 0 kg/m2 as real values, not
+    /// missing data. Painting them would fill every cloudless cell.
+    #[test]
+    fn zero_echo_top_and_zero_vil_are_invisible() {
+        assert_eq!(product_rgb(0.0, RadarProduct::EchoTop, Colormap::Threat), None);
+        assert_eq!(
+            product_rgb(-0.999, RadarProduct::EchoTop, Colormap::Threat),
+            None,
+            "negative RETOP is a missing-value sentinel scaled to km"
+        );
+        assert_eq!(
+            product_rgb(0.0, RadarProduct::VerticallyIntegratedLiquid, Colormap::Threat),
+            None
+        );
+        assert_eq!(
+            product_rgb(0.4, RadarProduct::VerticallyIntegratedLiquid, Colormap::Threat),
+            None
+        );
+    }
+
+    #[test]
+    fn severe_echo_tops_and_vil_paint_hot_colours() {
+        let deep = product_rgb(15.0, RadarProduct::EchoTop, Colormap::Threat).unwrap();
+        assert!(deep.0 > deep.2, "a 15 km top should be warm: {deep:?}");
+        let hail = product_rgb(65.0, RadarProduct::VerticallyIntegratedLiquid, Colormap::Threat)
+            .unwrap();
+        assert!(hail.0 > hail.2, "65 kg/m2 is a hail signature and should be warm: {hail:?}");
     }
 
     #[test]

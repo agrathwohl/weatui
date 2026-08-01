@@ -49,7 +49,7 @@ fn zcta_table() -> &'static Vec<(&'static str, Coords)> {
     TABLE.get_or_init(|| parse_table(ZCTA_CSV))
 }
 
-fn radar_table() -> &'static Vec<(&'static str, Coords)> {
+pub(crate) fn radar_table() -> &'static Vec<(&'static str, Coords)> {
     static TABLE: OnceLock<Vec<(&'static str, Coords)>> = OnceLock::new();
     TABLE.get_or_init(|| parse_table(WSR88D_CSV))
 }

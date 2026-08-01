@@ -7,7 +7,8 @@ use crate::geo::{Coords, RadarSite, nearest_radar_site, radar_site_by_id};
 use crate::notify;
 use crate::radar::grid::{Viewport, rasterize_product};
 use crate::radar::ring::{FrameRing, RadarFrame};
-use crate::radar::{RadarField, RadarProduct, fetch};
+use crate::radar::{DbzGrid, RadarField, RadarProduct, fetch};
+use crate::render::colormap::product_rgb;
 use crate::render::hud::Hud;
 use crate::render::overlay::{
     HOME_MARKER, LETHAL_OUTLINE, PixelOverlay, DISTANCE_RING, SEVERE_OUTLINE, WATCH_OUTLINE,
@@ -33,6 +34,25 @@ const HUD_WIDTH: u16 = 34;
 const DISTANCE_RING_KM: &[f64] = &[25.0, 50.0, 100.0];
 const MAX_FORECAST_FRAMES: usize = 18;
 
+/// Base layers exist on both halves of the timeline, so switching bases never
+/// blanks the forecast side. The observation-only moments are augmentations
+/// painted over whichever base is showing.
+const BASE_PRODUCTS: [RadarProduct; 3] = [
+    RadarProduct::Reflectivity,
+    RadarProduct::EchoTop,
+    RadarProduct::VerticallyIntegratedLiquid,
+];
+const AUG_PRODUCTS: [RadarProduct; 4] = [
+    RadarProduct::Velocity,
+    RadarProduct::CorrelationCoefficient,
+    RadarProduct::DifferentialReflectivity,
+    RadarProduct::SpectrumWidth,
+];
+/// Augmentations paint only inside real echo. Below this the Doppler and
+/// dual-pol moments are dominated by clear-air biologicals, and a default-on
+/// velocity layer would light up every summer night with false rotation.
+const AUG_MIN_REFLECTIVITY_DBZ: f32 = 30.0;
+
 const HELP: &str = "\
  MAP
    h j k l    pan west/south/north/east
@@ -46,6 +66,10 @@ const HELP: &str = "\
    G          newest (live)
    space      play / pause
    < >        slower / faster
+
+ LAYERS
+   1 2 3      base: reflectivity / echo top / VIL
+   4 5 6 7    toggle: velocity / debris CC / ZDR / spec width
 
  FORECAST
    f          cycle horizon: 2h / 6h / 18h
@@ -62,16 +86,19 @@ pub enum ForecastHorizon {
 }
 
 impl ForecastHorizon {
-    pub fn steps(self) -> Vec<crate::radar::hrrr::ForecastStep> {
-        use crate::radar::hrrr::{hourly_steps, quarter_hourly_steps};
+    /// `cycle_age` shifts the window so the horizon counts forward from now
+    /// rather than from a cycle that may already be two hours old.
+    pub fn steps(self, cycle_age: chrono::Duration) -> Vec<crate::radar::hrrr::ForecastStep> {
+        use crate::radar::hrrr::{MAX_LEAD_MINUTES, leads_every};
+        let age = cycle_age.num_minutes().clamp(0, MAX_LEAD_MINUTES as i64) as u16;
         match self {
-            ForecastHorizon::Near => quarter_hourly_steps(2),
+            ForecastHorizon::Near => leads_every(15, age, age + 120),
             ForecastHorizon::Mid => {
-                let mut steps = quarter_hourly_steps(2);
-                steps.extend(hourly_steps(3, 6));
+                let mut steps = leads_every(15, age, age + 120);
+                steps.extend(leads_every(60, age + 120, age + 360));
                 steps
             }
-            ForecastHorizon::Long => hourly_steps(1, 18),
+            ForecastHorizon::Long => leads_every(60, age, age + 1080),
         }
     }
 
@@ -91,11 +118,6 @@ impl ForecastHorizon {
         }
     }
 }
-
-/// Shifted digits on a US layout. Matching the character rather than the
-/// SHIFT modifier keeps this working on terminals that report shifted digits
-/// without setting the modifier bit.
-const SHIFTED_DIGITS: [char; 9] = ['!', '@', '#', '$', '%', '^', '&', '*', '('];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -158,12 +180,8 @@ pub fn resolve_key(pending: &mut Option<char>, key: KeyEvent) -> Action {
         KeyCode::Char('>') => Action::Faster,
         KeyCode::Char('<') => Action::Slower,
         KeyCode::Char('f') => Action::CycleForecast,
-        KeyCode::Char(c @ '1'..='9') => {
-            Action::SelectProduct(c.to_digit(10).unwrap_or(1) as usize - 1)
-        }
-        KeyCode::Char(c) if SHIFTED_DIGITS.contains(&c) => Action::ToggleProductOverlay(
-            SHIFTED_DIGITS.iter().position(|s| *s == c).unwrap_or(0),
-        ),
+        KeyCode::Char(c @ '1'..='3') => Action::SelectProduct(c as usize - '1' as usize),
+        KeyCode::Char(c @ '4'..='7') => Action::ToggleProductOverlay(c as usize - '4' as usize),
         KeyCode::Char('?') => Action::ToggleHelp,
         KeyCode::Char('q') | KeyCode::Esc => Action::Quit,
         KeyCode::Char(c @ ('g' | 'z' | 'Z')) => {
@@ -190,6 +208,7 @@ pub struct App {
     product_overlays: Vec<RadarProduct>,
     horizon: ForecastHorizon,
     horizon_tx: Option<tokio::sync::watch::Sender<ForecastHorizon>>,
+    conditions: Option<crate::conditions::Conditions>,
     show_help: bool,
     quit: bool,
     status: String,
@@ -220,9 +239,10 @@ impl App {
             pending: None,
             playback: Duration::from_millis(450),
             product: RadarProduct::Reflectivity,
-            product_overlays: Vec::new(),
+            product_overlays: vec![RadarProduct::Velocity, RadarProduct::CorrelationCoefficient],
             horizon: ForecastHorizon::Near,
             horizon_tx: None,
+            conditions: None,
             show_help: false,
             quit: false,
             status: format!(
@@ -261,30 +281,16 @@ impl App {
                 self.playback = self.playback.mul_f64(1.4).min(Duration::from_millis(4000))
             }
             Action::SelectProduct(i) => {
-                if let Some(p) = RadarProduct::ALL.get(i).copied() {
+                if let Some(p) = BASE_PRODUCTS.get(i).copied() {
                     self.product = p;
-                    self.status = format!("base layer: {} ({})", p.label(), p.units());
                 }
             }
             Action::ToggleProductOverlay(i) => {
-                if let Some(p) = RadarProduct::ALL.get(i).copied() {
-                    if let Some(at) = self.product_overlays.iter().position(|q| *q == p) {
-                        self.product_overlays.remove(at);
-                    } else {
-                        self.product_overlays.push(p);
+                if let Some(p) = AUG_PRODUCTS.get(i).copied() {
+                    match self.product_overlays.iter().position(|q| *q == p) {
+                        Some(at) => drop(self.product_overlays.remove(at)),
+                        None => self.product_overlays.push(p),
                     }
-                    self.status = if self.product_overlays.is_empty() {
-                        "overlays: none".to_string()
-                    } else {
-                        format!(
-                            "overlays: {}",
-                            self.product_overlays
-                                .iter()
-                                .map(|p| p.label())
-                                .collect::<Vec<_>>()
-                                .join(" + ")
-                        )
-                    };
                 }
             }
             Action::CycleForecast => {
@@ -300,9 +306,127 @@ impl App {
         }
     }
 
+}
+
+/// A frame with nothing to draw and a frame that failed to load are both solid
+/// black. Only this number tells them apart, which is why it is on screen
+/// rather than left for the user to infer.
+fn drawn_cells(grid: &DbzGrid, product: RadarProduct, map: Colormap) -> usize {
+    (0..grid.height)
+        .flat_map(|y| (0..grid.width).map(move |x| (x, y)))
+        .filter(|(x, y)| {
+            grid.get(*x, *y)
+                .and_then(|v| product_rgb(v, product, map))
+                .is_some()
+        })
+        .count()
+}
+
+fn echo_summary(grid: &DbzGrid, product: RadarProduct, map: Colormap) -> String {
+    match drawn_cells(grid, product, map) {
+        0 if grid.value_range().is_some() => "no echo in view".to_string(),
+        0 => "no data in view".to_string(),
+        n => format!("{n} cells"),
+    }
+}
+
+/// Coarse sweep for the closest drawable echo outside the viewport.
+///
+/// Only runs on an otherwise blank frame, so the cost never lands on a frame
+/// that has something to draw. The step is deliberately far coarser than the
+/// display: this answers "is there weather anywhere near me", not "where
+/// exactly", and a fine sweep here would stall the redraw loop.
+fn nearest_echo_km(
+    field: &dyn RadarField,
+    home: Coords,
+    product: RadarProduct,
+    map: Colormap,
+) -> Option<(f64, &'static str)> {
+    let mut best: Option<(f64, &'static str)> = None;
+    let mut lat = home.lat - 8.0;
+    while lat < home.lat + 8.0 {
+        let mut lon = home.lon - 8.0;
+        while lon < home.lon + 8.0 {
+            let at = Coords { lat, lon };
+            if field
+                .value_at(at, product)
+                .and_then(|v| product_rgb(v, product, map))
+                .is_some()
+            {
+                let km = crate::geo::haversine_km(home, at);
+                if best.is_none_or(|(d, _)| km < d) {
+                    best = Some((km, compass(home, at)));
+                }
+            }
+            lon += 0.25;
+        }
+        lat += 0.25;
+    }
+    best
+}
+
+fn compass(from: Coords, to: Coords) -> &'static str {
+    const POINTS: [&str; 8] = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+    let bearing = (to.lon - from.lon)
+        .atan2(to.lat - from.lat)
+        .to_degrees()
+        .rem_euclid(360.0);
+    POINTS[(((bearing + 22.5) / 45.0) as usize) % 8]
+}
+
+impl App {
+    /// The layer set is standing state, so it is rendered every frame rather
+    /// than announced once into `status`, which the next poll would overwrite.
+    fn layer_summary(&self) -> String {
+        let mut out = match self.product.units() {
+            "" => self.product.label().to_string(),
+            units => format!("{} {units}", self.product.label()),
+        };
+        for extra in &self.product_overlays {
+            out.push_str(" + ");
+            out.push_str(extra.label());
+        }
+        out
+    }
+
+    /// Overlay products are painted before the warning geometry, so a polygon
+    /// outline is never buried under the field it is warning about.
+    fn paint_product_overlays(&self, overlay: &mut PixelOverlay) {
+        let Some(frame) = self.ring.current() else { return };
+        let field = frame.field.as_ref();
+        let augs: Vec<RadarProduct> = self
+            .product_overlays
+            .iter()
+            .copied()
+            .filter(|p| field.supports(*p))
+            .collect();
+        if augs.is_empty() {
+            return;
+        }
+        let echo = rasterize_product(field, &self.viewport, RadarProduct::Reflectivity);
+        for product in augs {
+            let grid = rasterize_product(field, &self.viewport, product);
+            for y in 0..grid.height {
+                for x in 0..grid.width {
+                    if !echo.get(x, y).is_some_and(|dbz| dbz >= AUG_MIN_REFLECTIVITY_DBZ) {
+                        continue;
+                    }
+                    let Some(value) = grid.get(x, y) else { continue };
+                    if !product.is_notable(value) {
+                        continue;
+                    }
+                    if let Some(rgb) = product_rgb(value, product, self.colormap) {
+                        overlay.set(x as i64, y as i64, rgb);
+                    }
+                }
+            }
+        }
+    }
+
     fn build_overlay(&self, width: usize, height: usize) -> PixelOverlay {
         let mut overlay = PixelOverlay::new(width, height);
         overlay.draw_distance_rings(self.home, DISTANCE_RING_KM, &self.viewport, DISTANCE_RING);
+        self.paint_product_overlays(&mut overlay);
         let mut ordered: Vec<_> = self.active.iter().collect();
         ordered.sort_by_key(|a| a.tier);
         for entry in ordered {
@@ -343,12 +467,66 @@ impl App {
         };
 
         frame.render_widget(
-            RadarRaster { grid: &grid, overlay: Some(&overlay), colormap: self.colormap },
+            RadarRaster { grid: &grid, overlay: Some(&overlay), colormap: self.colormap, product: self.product },
             map,
         );
+
+        // An empty frame and a broken one are the same black rectangle, so an
+        // empty one has to say so on the map rather than only in the status.
+        // Never paint the explainer over an active warning: a banner that
+        // hides a tornado polygon is worse than an unexplained black frame.
+        if drawn_cells(&grid, self.product, self.colormap) == 0
+            && self.active.is_empty()
+            && let Some(f) = self.ring.current()
+        {
+            let banner = if !f.field.supports(self.product) {
+                format!(
+                    " {} UNAVAILABLE ON THIS FRAME \n {} did not provide it ",
+                    self.product.label().to_uppercase(),
+                    f.field.source_label(),
+                )
+            } else {
+                match nearest_echo_km(f.field.as_ref(), self.home, self.product, self.colormap) {
+                    Some((km, dir)) => format!(
+                        " NO {} IN VIEW \n {} \n nearest {:.0} km {} \n zo zooms out · hjkl pan ",
+                        self.product.label().to_uppercase(),
+                        f.field.source_label(),
+                        km,
+                        dir
+                    ),
+                    None => format!(
+                        " NO {} IN VIEW \n {} \n none within 800 km ",
+                        self.product.label().to_uppercase(),
+                        f.field.source_label()
+                    ),
+                }
+            };
+            let lines = banner.lines().count() as u16;
+            let width = banner.lines().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
+            if map.width > width && map.height > lines {
+                let area = Rect::new(
+                    map.x + (map.width - width) / 2,
+                    map.y + (map.height - lines) / 2,
+                    width,
+                    lines,
+                );
+                frame.render_widget(Clear, area);
+                frame.render_widget(
+                    Paragraph::new(banner)
+                        .style(Style::default().fg(Color::Rgb(150, 155, 165)))
+                        .alignment(ratatui::layout::Alignment::Center),
+                    area,
+                );
+            }
+        }
         frame.render_widget(Timeline { ring: &self.ring, tz: self.tz }, rows[1]);
         frame.render_widget(
-            Paragraph::new(self.status.clone())
+            Paragraph::new(format!(
+                "{} | {} | {}",
+                self.layer_summary(),
+                echo_summary(&grid, self.product, self.colormap),
+                self.status
+            ))
                 .style(Style::default().fg(Color::Rgb(130, 130, 140))),
             rows[2],
         );
@@ -365,6 +543,8 @@ impl App {
                 site: self.site.id,
                 home: self.home,
                 peak_dbz: grid.value_range().map(|(_, hi)| hi),
+                peak_units: self.product.units(),
+                conditions: self.conditions.as_ref(),
                 tz: self.tz,
                 eta_for: &eta,
             },
@@ -433,6 +613,7 @@ enum Update {
     Alerts(Box<AlertSnapshot>),
     Radar(Result<RadarUpdate>),
     Forecast(Result<Box<ForecastUpdate>>),
+    Conditions(Result<Box<crate::conditions::Conditions>>),
 }
 
 pub async fn run(cfg: Config, home: Coords) -> Result<()> {
@@ -448,6 +629,47 @@ pub async fn run(cfg: Config, home: Coords) -> Result<()> {
     let site_id = app.site.id.to_string();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Update>(16);
+
+    let conditions_tx = tx.clone();
+    tokio::spawn(async move {
+        let client = match reqwest::Client::builder()
+            .user_agent(crate::alert::poll::USER_AGENT)
+            .timeout(Duration::from_secs(15))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = conditions_tx.send(Update::Conditions(Err(e.into()))).await;
+                return;
+            }
+        };
+        // Discovery failure is retried each cycle, and a station whose
+        // observations endpoint fails is rotated out for the next-nearest one
+        // instead of being retried forever with an empty panel.
+        let mut stations: Vec<String> = Vec::new();
+        let mut which = 0usize;
+        loop {
+            if stations.is_empty() {
+                stations = match crate::conditions::nearest_stations(&client, home).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = conditions_tx.send(Update::Conditions(Err(e))).await;
+                        Vec::new()
+                    }
+                };
+            }
+            if let Some(id) = stations.get(which % stations.len().max(1)) {
+                let result = crate::conditions::latest(&client, id).await;
+                if result.is_err() {
+                    which += 1;
+                }
+                if conditions_tx.send(Update::Conditions(result.map(Box::new))).await.is_err() {
+                    return;
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(300)).await;
+        }
+    });
 
     let alert_tx = tx.clone();
     let mut engine = AlertEngine::new(&cfg, home)?;
@@ -543,16 +765,20 @@ pub async fn run(cfg: Config, home: Coords) -> Result<()> {
             let horizon = *horizon_rx.borrow_and_update();
             match crate::radar::hrrr::latest_cycle(&client, chrono::Utc::now()).await {
                 Ok(cycle) => {
-                    // A cycle can be an hour old, so its earliest steps are
-                    // already covered by observations. Fetching them would
-                    // interleave stale model output with real radar.
+                    // The horizon window is placed past the cycle's age, so
+                    // this only guards against the clock moving between
+                    // planning the batch and fetching it.
                     let now = chrono::Utc::now();
                     let steps: Vec<_> = horizon
-                        .steps()
+                        .steps(now - cycle)
                         .into_iter()
                         .filter(|s| cycle + chrono::Duration::minutes(s.lead_minutes()) > now)
                         .collect();
                     let total = steps.len();
+                    // The drop signal must ride on the first SUCCESS, not on
+                    // step zero: if step zero errors, hanging the signal on it
+                    // would leave the previous batch interleaved with this one.
+                    let mut batch_started = false;
                     for (index, step) in steps.into_iter().enumerate() {
                         let update = crate::radar::hrrr::fetch_step(&client, cycle, step)
                             .await
@@ -561,7 +787,7 @@ pub async fn run(cfg: Config, home: Coords) -> Result<()> {
                                     valid_at: f.valid_at,
                                     lead_minutes: f.lead_minutes,
                                     field: Box::new(f),
-                                    first_of_batch: index == 0,
+                                    first_of_batch: !std::mem::replace(&mut batch_started, true),
                                     index,
                                     total,
                                 })
@@ -673,6 +899,10 @@ async fn event_loop(
                 }
                 Update::Forecast(Err(e)) => {
                     app.status = format!("forecast unavailable: {e:#}");
+                }
+                Update::Conditions(Ok(c)) => app.conditions = Some(*c),
+                Update::Conditions(Err(e)) => {
+                    app.status = format!("conditions unavailable: {e:#}");
                 }
                 Update::Radar(Err(e)) => {
                     app.status = format!("radar fetch failed: {e:#}");
@@ -805,35 +1035,28 @@ mod tests {
     }
 
     #[test]
-    fn digits_select_the_base_product() {
+    fn digits_one_to_three_select_the_base_product() {
         assert_eq!(press(&[key('1')]), Action::SelectProduct(0));
-        assert_eq!(press(&[key('5')]), Action::SelectProduct(4));
-        assert_eq!(press(&[key('9')]), Action::SelectProduct(8));
-    }
-
-    /// Shifted digits toggle an additive overlay rather than replacing the base,
-    /// so several products can be on screen at once.
-    #[test]
-    fn shifted_digits_toggle_overlays_on_the_matching_product() {
-        assert_eq!(press(&[key('!')]), Action::ToggleProductOverlay(0));
-        assert_eq!(press(&[key('$')]), Action::ToggleProductOverlay(3));
-        assert_eq!(press(&[key('(')]), Action::ToggleProductOverlay(8));
+        assert_eq!(press(&[key('2')]), Action::SelectProduct(1));
+        assert_eq!(press(&[key('3')]), Action::SelectProduct(2));
     }
 
     #[test]
-    fn a_digit_and_its_shifted_form_address_the_same_product() {
-        for (plain, shifted) in "123456789".chars().zip(SHIFTED_DIGITS) {
-            let base = match press(&[key(plain)]) {
-                Action::SelectProduct(i) => i,
-                other => panic!("{plain} gave {other:?}"),
-            };
-            let overlay = match press(&[key(shifted)]) {
-                Action::ToggleProductOverlay(i) => i,
-                other => panic!("{shifted} gave {other:?}"),
-            };
-            assert_eq!(base, overlay, "{plain} and {shifted} must be the same product");
-        }
+    fn digits_four_to_seven_toggle_augmentations() {
+        assert_eq!(press(&[key('4')]), Action::ToggleProductOverlay(0));
+        assert_eq!(press(&[key('5')]), Action::ToggleProductOverlay(1));
+        assert_eq!(press(&[key('7')]), Action::ToggleProductOverlay(3));
     }
+
+    #[test]
+    fn digits_and_shifted_digits_beyond_the_layer_set_are_unbound() {
+        assert_eq!(press(&[key('8')]), Action::Ignored);
+        assert_eq!(press(&[key('9')]), Action::Ignored);
+        assert_eq!(press(&[key('!')]), Action::Ignored);
+        assert_eq!(press(&[key('(')]), Action::Ignored);
+    }
+
+
 
     #[test]
     fn selecting_a_product_beyond_the_list_is_a_no_op() {
@@ -846,39 +1069,297 @@ mod tests {
         assert_eq!(app.product, RadarProduct::Reflectivity, "out of range must not change it");
     }
 
-    #[test]
-    fn overlay_toggling_adds_then_removes() {
-        let cfg = crate::config::Config::parse("[location]\nzip = \"73019\"\n", "/tmp/c.toml").unwrap();
+    /// Reports one fixed value for every product everywhere, so an overlay
+    /// test can choose exactly whether the reading is diagnostic or ordinary.
+    struct StormField {
+        refl: f32,
+        moment: f32,
+    }
+
+    impl RadarField for StormField {
+        fn value_at(&self, _at: Coords, product: RadarProduct) -> Option<f32> {
+            Some(match product {
+                RadarProduct::Reflectivity => self.refl,
+                _ => self.moment,
+            })
+        }
+        fn supports(&self, _product: RadarProduct) -> bool {
+            true
+        }
+        fn source_label(&self) -> &str {
+            "TEST"
+        }
+        fn elevation_degrees(&self) -> f32 {
+            0.5
+        }
+    }
+
+    fn app_showing(refl: f32, moment: f32) -> App {
+        let cfg =
+            crate::config::Config::parse("[location]\nzip = \"73019\"\n", "/tmp/c.toml").unwrap();
         let mut app =
             App::new(&cfg, Coords { lat: 35.2, lon: -97.4 }, chrono_tz::UTC).unwrap();
-        assert!(app.product_overlays.is_empty());
-        app.apply(Action::ToggleProductOverlay(1));
-        assert_eq!(app.product_overlays, vec![RadarProduct::Velocity]);
-        app.apply(Action::ToggleProductOverlay(2));
-        assert_eq!(app.product_overlays.len(), 2);
-        app.apply(Action::ToggleProductOverlay(1));
-        assert_eq!(app.product_overlays, vec![RadarProduct::CorrelationCoefficient]);
+        app.viewport.width = 20;
+        app.viewport.height = 20;
+        app.ring.push(RadarFrame {
+            captured_at: chrono::Utc::now(),
+            field: std::sync::Arc::new(StormField { refl, moment }),
+            projected: false,
+        });
+        app
+    }
+
+    fn without_augs(mut app: App) -> App {
+        app.product_overlays.clear();
+        app
     }
 
     #[test]
+    fn compass_names_the_direction_of_the_nearest_echo() {
+        let home = Coords { lat: 36.0, lon: -87.0 };
+        assert_eq!(compass(home, Coords { lat: 38.0, lon: -87.0 }), "N");
+        assert_eq!(compass(home, Coords { lat: 34.0, lon: -87.0 }), "S");
+        assert_eq!(compass(home, Coords { lat: 36.0, lon: -85.0 }), "E");
+        assert_eq!(compass(home, Coords { lat: 36.0, lon: -89.0 }), "W");
+        assert_eq!(compass(home, Coords { lat: 34.0, lon: -89.0 }), "SW");
+        assert_eq!(compass(home, Coords { lat: 38.0, lon: -85.0 }), "NE");
+    }
+
+    /// A blank frame must report where the weather actually is, so an empty
+    /// view reads as "clear here" rather than "the app died".
+    #[test]
+    fn nearest_echo_is_found_outside_the_viewport() {
+        let home = Coords { lat: 36.0, lon: -87.0 };
+        let field = crate::radar::testing::DiskField {
+            centre: Coords { lat: 33.5, lon: -89.6 },
+            radius_km: 40.0,
+            dbz: 30.0,
+        };
+        let (km, dir) =
+            nearest_echo_km(&field, home, RadarProduct::Reflectivity, Colormap::Threat)
+                .expect("echo exists within the search radius");
+        assert!((250.0..400.0).contains(&km), "unexpected distance {km}");
+        assert_eq!(dir, "SW");
+    }
+
+    #[test]
+    fn a_field_with_no_echo_anywhere_reports_none() {
+        let field = crate::radar::testing::DiskField {
+            centre: Coords { lat: 0.0, lon: 0.0 },
+            radius_km: 1.0,
+            dbz: 30.0,
+        };
+        assert!(
+            nearest_echo_km(
+                &field,
+                Coords { lat: 36.0, lon: -87.0 },
+                RadarProduct::Reflectivity,
+                Colormap::Threat
+            )
+            .is_none()
+        );
+    }
+
+    /// The whole point of the summary: an empty sky and a failed fetch look
+    /// identical on screen, and only this line separates them.
+    #[test]
+    fn echo_summary_separates_an_empty_sky_from_a_missing_frame() {
+        let empty = DbzGrid::new(4, 4);
+        assert_eq!(
+            echo_summary(&empty, RadarProduct::Reflectivity, Colormap::Threat),
+            "no data in view"
+        );
+
+        let mut below_threshold = DbzGrid::new(4, 4);
+        below_threshold.set(1, 1, Some(-10.0));
+        assert_eq!(
+            echo_summary(&below_threshold, RadarProduct::Reflectivity, Colormap::Threat),
+            "no echo in view",
+            "HRRR fills its grid with a no-echo floor; that is data, not absence"
+        );
+
+        let mut storm = DbzGrid::new(4, 4);
+        storm.set(0, 0, Some(45.0));
+        storm.set(2, 2, Some(20.0));
+        assert_eq!(
+            echo_summary(&storm, RadarProduct::Reflectivity, Colormap::Threat),
+            "2 cells"
+        );
+    }
+
+    /// The layer set must survive a background poll, which overwrites `status`.
+    #[test]
+    fn the_layer_summary_lists_the_base_then_each_augmentation() {
+        let mut app = app_showing(30.0, 0.98);
+        assert_eq!(
+            app.layer_summary(),
+            "reflectivity dBZ + velocity + corr coeff",
+            "velocity and debris detection must be on by default"
+        );
+
+        app.apply(Action::SelectProduct(1));
+        assert_eq!(app.layer_summary(), "echo top km + velocity + corr coeff");
+
+        app.apply(Action::ToggleProductOverlay(0));
+        app.apply(Action::ToggleProductOverlay(1));
+        assert_eq!(app.layer_summary(), "echo top km");
+    }
+
+    #[test]
+    fn augmentations_default_to_velocity_and_debris() {
+        let app = app_showing(30.0, 0.98);
+        assert_eq!(
+            app.product_overlays,
+            vec![RadarProduct::Velocity, RadarProduct::CorrelationCoefficient]
+        );
+    }
+
+    #[test]
+    fn toggling_an_augmentation_adds_then_removes() {
+        let mut app = app_showing(30.0, 0.98);
+        app.apply(Action::ToggleProductOverlay(1));
+        assert_eq!(app.product_overlays, vec![RadarProduct::Velocity]);
+        app.apply(Action::ToggleProductOverlay(2));
+        assert_eq!(
+            app.product_overlays,
+            vec![RadarProduct::Velocity, RadarProduct::DifferentialReflectivity]
+        );
+    }
+
+    #[test]
+    fn an_augmentation_paints_its_diagnostic_tail_inside_echo() {
+        let debris = app_showing(45.0, 0.45);
+        let painted = debris.build_overlay(20, 20);
+        let expected = product_rgb(0.45, RadarProduct::CorrelationCoefficient, debris.colormap);
+        assert_eq!(painted.get(3, 3), expected, "a debris signature inside a core must be drawn");
+    }
+
+    #[test]
+    fn ordinary_readings_do_not_cover_the_base_even_inside_echo() {
+        let rain = app_showing(45.0, 0.98);
+        let bare = without_augs(app_showing(45.0, 0.98)).build_overlay(20, 20).painted();
+        assert_eq!(
+            rain.build_overlay(20, 20).painted(),
+            bare,
+            "healthy rain has nothing diagnostic to highlight"
+        );
+    }
+
+    /// The regression that would ruin every clear summer night: biologicals
+    /// collapse correlation and drift at jet speed, so without the echo gate
+    /// the default-on augmentations would flood an empty sky with false
+    /// rotation and debris pixels.
+    #[test]
+    fn augmentations_stay_dark_outside_real_echo() {
+        let bugs = app_showing(10.0, 0.20);
+        let bare = without_augs(app_showing(10.0, 0.20)).build_overlay(20, 20).painted();
+        assert_eq!(
+            bugs.build_overlay(20, 20).painted(),
+            bare,
+            "a correlation collapse in 10 dBZ clear-air return is bugs, not debris"
+        );
+    }
+
+    #[test]
+    fn a_frame_that_cannot_produce_the_augmentation_keeps_its_base() {
+        let mut app = without_augs(app_showing(45.0, 0.45));
+        app.product_overlays = vec![RadarProduct::Velocity];
+        app.ring.push(RadarFrame {
+            captured_at: chrono::Utc::now() + chrono::Duration::minutes(30),
+            field: std::sync::Arc::new(crate::radar::testing::DiskField {
+                centre: Coords { lat: 35.2, lon: -97.4 },
+                radius_km: 500.0,
+                dbz: 40.0,
+            }),
+            projected: true,
+        });
+        app.ring.jump_newest();
+        let bare = {
+            let mut b = without_augs(app_showing(45.0, 0.45));
+            b.ring.push(RadarFrame {
+                captured_at: chrono::Utc::now() + chrono::Duration::minutes(30),
+                field: std::sync::Arc::new(crate::radar::testing::DiskField {
+                    centre: Coords { lat: 35.2, lon: -97.4 },
+                    radius_km: 500.0,
+                    dbz: 40.0,
+                }),
+                projected: true,
+            });
+            b.ring.jump_newest();
+            b.build_overlay(20, 20).painted()
+        };
+        assert_eq!(
+            app.build_overlay(20, 20).painted(),
+            bare,
+            "a forecast frame skips unsupported augmentations instead of blanking"
+        );
+    }
+
+
+    #[test]
+    fn warning_geometry_survives_an_augmentation_painted_beneath_it() {
+        let app = app_showing(45.0, 0.20);
+        let overlay = app.build_overlay(20, 20);
+        let (cx, cy) = app.viewport.project_to_nearest_pixel(app.home);
+        assert_eq!(
+            overlay.get(cx as usize + 1, cy as usize),
+            Some(HOME_MARKER),
+            "home must stay visible through a full-coverage overlay"
+        );
+    }
+
+
+    /// Realistic HRRR publication lags. The 0 case is the ideal that never
+    /// happens in production; the rest are what the app actually sees.
+    const CYCLE_AGES: [i64; 5] = [0, 35, 65, 95, 125];
+
+    #[test]
     fn the_default_horizon_is_two_hours_at_quarter_hour_steps() {
-        let steps = ForecastHorizon::Near.steps();
+        let steps = ForecastHorizon::Near.steps(chrono::Duration::zero());
         assert_eq!(steps.len(), 8);
         assert_eq!(steps.first().unwrap().lead_minutes(), 15);
         assert_eq!(steps.last().unwrap().lead_minutes(), 120);
+    }
+
+    /// The reported bug: forecast frames were nearly absent because the window
+    /// was anchored to the cycle, so an aged cycle put it entirely in the past.
+    #[test]
+    fn an_aged_cycle_still_delivers_a_full_two_hour_horizon() {
+        for age in CYCLE_AGES {
+            let age = chrono::Duration::minutes(age);
+            let steps = ForecastHorizon::Near.steps(age);
+            assert_eq!(
+                steps.len(),
+                8,
+                "a cycle {} minutes old collapsed the horizon to {} frames",
+                age.num_minutes(),
+                steps.len()
+            );
+            assert!(
+                steps.iter().all(|s| s.lead_minutes() > age.num_minutes()),
+                "every step must still be ahead of now for a {}-minute-old cycle",
+                age.num_minutes()
+            );
+        }
     }
 
     /// Mid splices quarter-hourly and hourly lists, which is where a duplicate
     /// or out-of-order lead would hide.
     #[test]
     fn every_horizon_has_strictly_increasing_distinct_leads() {
-        for horizon in [ForecastHorizon::Near, ForecastHorizon::Mid, ForecastHorizon::Long] {
-            let leads: Vec<i64> = horizon.steps().iter().map(|s| s.lead_minutes()).collect();
-            assert!(!leads.is_empty(), "{horizon:?} produced no steps");
-            assert!(
-                leads.windows(2).all(|w| w[0] < w[1]),
-                "{horizon:?} leads are not strictly increasing: {leads:?}"
-            );
+        for age in CYCLE_AGES {
+            for horizon in [ForecastHorizon::Near, ForecastHorizon::Mid, ForecastHorizon::Long] {
+                let leads: Vec<i64> = horizon
+                    .steps(chrono::Duration::minutes(age))
+                    .iter()
+                    .map(|s| s.lead_minutes())
+                    .collect();
+                assert!(!leads.is_empty(), "{horizon:?} produced no steps at age {age}");
+                assert!(
+                    leads.windows(2).all(|w| w[0] < w[1]),
+                    "{horizon:?} leads not increasing at age {age}: {leads:?}"
+                );
+            }
         }
     }
 
@@ -886,13 +1367,22 @@ mod tests {
     /// exceed the reserved headroom or it would evict observed volumes.
     #[test]
     fn no_horizon_exceeds_the_reserved_ring_headroom() {
-        for horizon in [ForecastHorizon::Near, ForecastHorizon::Mid, ForecastHorizon::Long] {
-            let n = horizon.steps().len();
-            assert!(
-                n <= MAX_FORECAST_FRAMES,
-                "{horizon:?} needs {n} frames but only {MAX_FORECAST_FRAMES} are reserved"
-            );
+        for age in CYCLE_AGES {
+            for horizon in [ForecastHorizon::Near, ForecastHorizon::Mid, ForecastHorizon::Long] {
+                let n = horizon.steps(chrono::Duration::minutes(age)).len();
+                assert!(
+                    n <= MAX_FORECAST_FRAMES,
+                    "{horizon:?} needs {n} frames at age {age} but {MAX_FORECAST_FRAMES} are reserved"
+                );
+            }
         }
+    }
+
+    /// A clock skewed backwards must not generate leads behind the cycle.
+    #[test]
+    fn a_negative_cycle_age_is_treated_as_a_fresh_cycle() {
+        let steps = ForecastHorizon::Near.steps(chrono::Duration::minutes(-30));
+        assert_eq!(steps.first().unwrap().lead_minutes(), 15);
     }
 
     #[test]

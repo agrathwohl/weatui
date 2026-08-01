@@ -94,6 +94,7 @@ impl Viewport {
     }
 }
 
+#[cfg(test)]
 pub fn rasterize(field: &dyn RadarField, viewport: &Viewport) -> DbzGrid {
     rasterize_product(field, viewport, RadarProduct::Reflectivity)
 }

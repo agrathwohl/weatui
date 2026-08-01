@@ -34,6 +34,61 @@ pub fn tier_color(tier: ThreatTier) -> Color {
     }
 }
 
+fn reading(v: Option<f32>, unit: &str) -> String {
+    match v {
+        Some(x) if unit == " mi" && x < 3.0 => format!("{x:.1}{unit}"),
+        Some(x) => {
+            let r = if x.round() == 0.0 { 0.0 } else { x.round() };
+            format!("{r:.0}{unit}")
+        }
+        None => format!("--{unit}"),
+    }
+}
+
+fn conditions_lines(c: &crate::conditions::Conditions) -> Vec<Line<'static>> {
+    let dim = Style::default().fg(Color::Rgb(140, 140, 150));
+    let faint = Style::default().fg(Color::Rgb(100, 100, 110));
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!(
+                "{} {}  dew {}",
+                glyph::THERMOMETER,
+                reading(c.temp_f, "\u{b0}F"),
+                reading(c.dewpoint_f, "\u{b0}F"),
+            ),
+            dim,
+        )),
+        Line::from(Span::styled(
+            format!(
+                "{} {}  {} {} {}",
+                glyph::HUMIDITY,
+                reading(c.humidity_pct, "%"),
+                glyph::STRONG_WIND,
+                reading(c.wind_mph, " mph"),
+                c.wind_dir.unwrap_or(""),
+            ),
+            dim,
+        )),
+    ];
+
+    let mut vis_line = format!("{} {} vis", glyph::EYE, reading(c.visibility_mi, " mi"));
+    if let Some(rain) = c.rain_last_hour_in.filter(|r| *r > 0.005) {
+        vis_line.push_str(&format!("  {} {rain:.2} in/h", glyph::RAINDROP));
+    }
+    lines.push(Line::from(Span::styled(vis_line, dim)));
+
+    if let Some(d) = &c.description {
+        lines.push(Line::from(Span::styled(d.clone(), dim)));
+    }
+
+    let age = c
+        .observed_at
+        .map(|t| (chrono::Utc::now() - t).num_minutes().max(0))
+        .map_or(String::new(), |m| format!(" \u{b7} {m}m old"));
+    lines.push(Line::from(Span::styled(format!("{}{age}", c.station), faint)));
+    lines
+}
+
 pub struct Hud<'a> {
     pub active: &'a [ActiveAlert],
     pub stale: bool,
@@ -41,6 +96,8 @@ pub struct Hud<'a> {
     pub site: &'a str,
     pub home: crate::geo::Coords,
     pub peak_dbz: Option<f32>,
+    pub peak_units: &'static str,
+    pub conditions: Option<&'a crate::conditions::Conditions>,
     pub tz: chrono_tz::Tz,
     pub eta_for: &'a dyn Fn(&crate::alert::Alert) -> Option<i64>,
 }
@@ -65,11 +122,17 @@ impl Hud<'_> {
 
         lines.push(Line::from(Span::styled(
             match self.peak_dbz {
-                Some(peak) => format!("{} {}  peak {peak:.0} dBZ", glyph::REFRESH, self.site),
+                Some(peak) => format!("{} {}  peak {peak:.0} {}", glyph::REFRESH, self.site, self.peak_units),
                 None => format!("{} {}", glyph::REFRESH, self.site),
             },
             Style::default().fg(Color::Rgb(140, 140, 150)),
         )));
+
+        if self.active.is_empty()
+            && let Some(c) = self.conditions
+        {
+            lines.extend(conditions_lines(c));
+        }
 
         let mut active: Vec<&ActiveAlert> = self.active.iter().collect();
         active.sort_by_key(|a| std::cmp::Reverse(a.tier));
@@ -172,6 +235,12 @@ impl Hud<'_> {
                 )));
             }
         }
+
+        // Below the warnings, so a long conditions block can only ever clip
+        // itself off a short terminal, never the instruction to take shelter.
+        if let Some(c) = self.conditions {
+            lines.extend(conditions_lines(c));
+        }
         lines
     }
 }
@@ -197,6 +266,58 @@ impl Widget for Hud<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conditions_render_readings_and_mark_missing_sensors() {
+        let c = crate::conditions::Conditions {
+            station: "KBNA".into(),
+            observed_at: Some(chrono::Utc::now() - chrono::Duration::minutes(24)),
+            description: Some("Partly Cloudy".into()),
+            temp_f: Some(74.0),
+            dewpoint_f: None,
+            humidity_pct: Some(61.0),
+            wind_mph: Some(8.0),
+            wind_dir: Some("SSW"),
+            visibility_mi: Some(0.25),
+            rain_last_hour_in: Some(0.12),
+        };
+        let text: Vec<String> = conditions_lines(&c)
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        let joined = text.join("\n");
+        assert!(joined.contains("74\u{b0}F"), "{joined}");
+        assert!(joined.contains("--\u{b0}F"), "a dead dewpoint sensor must show as --: {joined}");
+        assert!(joined.contains("8 mph SSW"), "{joined}");
+        assert!(joined.contains("0.2 mi"), "sub-3-mile visibility keeps a decimal: {joined}");
+        assert!(joined.contains("0.12 in/h"), "{joined}");
+        assert!(joined.contains("Partly Cloudy"), "{joined}");
+        assert!(joined.contains("KBNA \u{b7} 24m old"), "{joined}");
+    }
+
+    #[test]
+    fn dry_hours_hide_the_rain_reading_entirely() {
+        let c = crate::conditions::Conditions {
+            station: "KBNA".into(),
+            observed_at: None,
+            description: None,
+            temp_f: None,
+            dewpoint_f: None,
+            humidity_pct: None,
+            wind_mph: None,
+            wind_dir: None,
+            visibility_mi: None,
+            rain_last_hour_in: Some(0.0),
+        };
+        let text: Vec<String> = conditions_lines(&c)
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        let joined = text.join("\n");
+        assert!(!joined.contains("in/h"), "zero rain is not a reading worth a line: {joined}");
+        assert!(joined.contains("KBNA"), "{joined}");
+        assert!(!joined.contains("m old"), "no timestamp means no age claim: {joined}");
+    }
 
     #[test]
     fn tornado_products_get_the_rotation_glyph() {
@@ -236,11 +357,14 @@ mod tests {
             glyph::STORM_WARNING,
             glyph::NO_DATA,
             glyph::REFRESH,
+            glyph::THERMOMETER,
+            glyph::HUMIDITY,
+            glyph::RAINDROP,
         ] {
             let c = g as u32;
             assert!((0xe300..=0xe3e3).contains(&c), "{c:x} outside the weather range");
         }
-        for g in [glyph::PLAY, glyph::PAUSE, glyph::CLOCK] {
+        for g in [glyph::PLAY, glyph::PAUSE, glyph::CLOCK, glyph::EYE] {
             let c = g as u32;
             assert!((0xf000..=0xf381).contains(&c), "{c:x} outside the covered range");
         }
@@ -256,7 +380,7 @@ mod tests {
     fn quiet_hud_says_so_explicitly_rather_than_rendering_blank() {
         let active: Vec<ActiveAlert> = Vec::new();
         let eta = |_: &crate::alert::Alert| None;
-        let hud = Hud { active: &active, stale: false, stale_secs: 0, site: "KOHX", home: crate::geo::Coords { lat: 36.0, lon: -87.0 }, peak_dbz: None, tz: chrono_tz::America::Chicago, eta_for: &eta };
+        let hud = Hud { active: &active, stale: false, stale_secs: 0, site: "KOHX", home: crate::geo::Coords { lat: 36.0, lon: -87.0 }, peak_dbz: None, peak_units: "dBZ", conditions: None, tz: chrono_tz::America::Chicago, eta_for: &eta };
         let text: String = hud
             .lines()
             .iter()
@@ -269,7 +393,7 @@ mod tests {
     fn stale_feed_states_plainly_that_warnings_are_not_arriving() {
         let active: Vec<ActiveAlert> = Vec::new();
         let eta = |_: &crate::alert::Alert| None;
-        let hud = Hud { active: &active, stale: true, stale_secs: 420, site: "KOHX", home: crate::geo::Coords { lat: 36.0, lon: -87.0 }, peak_dbz: None, tz: chrono_tz::America::Chicago, eta_for: &eta };
+        let hud = Hud { active: &active, stale: true, stale_secs: 420, site: "KOHX", home: crate::geo::Coords { lat: 36.0, lon: -87.0 }, peak_dbz: None, peak_units: "dBZ", conditions: None, tz: chrono_tz::America::Chicago, eta_for: &eta };
         let text: String = hud
             .lines()
             .iter()
@@ -285,7 +409,7 @@ mod tests {
         let eta = |_: &crate::alert::Alert| None;
         let area = Rect::new(0, 0, 20, 5);
         let mut buf = Buffer::empty(area);
-        Hud { active: &active, stale: false, stale_secs: 0, site: "KOHX", home: crate::geo::Coords { lat: 36.0, lon: -87.0 }, peak_dbz: None, tz: chrono_tz::America::Chicago, eta_for: &eta }
+        Hud { active: &active, stale: false, stale_secs: 0, site: "KOHX", home: crate::geo::Coords { lat: 36.0, lon: -87.0 }, peak_dbz: None, peak_units: "dBZ", conditions: None, tz: chrono_tz::America::Chicago, eta_for: &eta }
             .render(area, &mut buf);
     }
 }

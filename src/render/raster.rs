@@ -6,7 +6,8 @@
 
 use crate::config::Colormap;
 use crate::radar::DbzGrid;
-use crate::render::colormap::{Rgb, cell_rgb};
+use crate::render::colormap::{Rgb, product_cell_rgb};
+use crate::radar::RadarProduct;
 use crate::render::overlay::PixelOverlay;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -19,20 +20,21 @@ pub const UPPER_HALF_BLOCK: char = '\u{2580}';
 /// (background) of column `c`.
 #[cfg(test)]
 pub fn cell_colors(grid: &DbzGrid, col: usize, row: usize, map: Colormap) -> (Rgb, Rgb) {
-    cell_colors_with(grid, None, col, row, map)
+    cell_colors_for(grid, None, col, row, map, RadarProduct::Reflectivity)
 }
 
-pub fn cell_colors_with(
+pub fn cell_colors_for(
     grid: &DbzGrid,
     overlay: Option<&PixelOverlay>,
     col: usize,
     row: usize,
     map: Colormap,
+    product: RadarProduct,
 ) -> (Rgb, Rgb) {
     let pixel = |y: usize| {
         overlay
             .and_then(|o| o.get(col, y))
-            .unwrap_or_else(|| cell_rgb(grid.get(col, y), map))
+            .unwrap_or_else(|| product_cell_rgb(grid.get(col, y), product, map))
     };
     (pixel(row * 2), pixel(row * 2 + 1))
 }
@@ -45,6 +47,7 @@ pub struct RadarRaster<'a> {
     pub grid: &'a DbzGrid,
     pub overlay: Option<&'a PixelOverlay>,
     pub colormap: Colormap,
+    pub product: RadarProduct,
 }
 
 impl Widget for RadarRaster<'_> {
@@ -52,7 +55,7 @@ impl Widget for RadarRaster<'_> {
         for row in 0..area.height as usize {
             for col in 0..area.width as usize {
                 let (top, bottom) =
-                    cell_colors_with(self.grid, self.overlay, col, row, self.colormap);
+                    cell_colors_for(self.grid, self.overlay, col, row, self.colormap, self.product);
                 let position = (area.x + col as u16, area.y + row as u16);
                 if let Some(cell) = buf.cell_mut(position) {
                     cell.set_char(UPPER_HALF_BLOCK)
@@ -116,7 +119,7 @@ mod tests {
         let g = grid();
         let area = Rect::new(0, 0, 3, 2);
         let mut buf = Buffer::empty(area);
-        RadarRaster { grid: &g, overlay: None, colormap: Colormap::Threat }.render(area, &mut buf);
+        RadarRaster { grid: &g, overlay: None, colormap: Colormap::Threat, product: RadarProduct::Reflectivity }.render(area, &mut buf);
 
         let cell = buf.cell((0, 0)).unwrap();
         assert_eq!(cell.symbol(), UPPER_HALF_BLOCK.to_string());
@@ -129,7 +132,7 @@ mod tests {
         let g = grid();
         let mut buf = Buffer::empty(Rect::new(0, 0, 10, 10));
         let area = Rect::new(4, 3, 3, 2);
-        RadarRaster { grid: &g, overlay: None, colormap: Colormap::Threat }.render(area, &mut buf);
+        RadarRaster { grid: &g, overlay: None, colormap: Colormap::Threat, product: RadarProduct::Reflectivity }.render(area, &mut buf);
         assert_eq!(buf.cell((4, 3)).unwrap().symbol(), UPPER_HALF_BLOCK.to_string());
         assert_eq!(buf.cell((0, 0)).unwrap().symbol(), " ");
     }
@@ -139,7 +142,7 @@ mod tests {
         let g = grid();
         let area = Rect::new(0, 0, 40, 20);
         let mut buf = Buffer::empty(area);
-        RadarRaster { grid: &g, overlay: None, colormap: Colormap::Threat }.render(area, &mut buf);
+        RadarRaster { grid: &g, overlay: None, colormap: Colormap::Threat, product: RadarProduct::Reflectivity }.render(area, &mut buf);
         assert_eq!(buf.cell((30, 15)).unwrap().symbol(), UPPER_HALF_BLOCK.to_string());
     }
 }

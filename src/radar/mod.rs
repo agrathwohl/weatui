@@ -1,6 +1,6 @@
 //! Radar ingest and resampling.
 //!
-//! Everything above this module sees only [`ReflectivityField`] and [`DbzGrid`].
+//! Everything above this module sees only [`RadarField`] and [`DbzGrid`].
 //! The nexrad crates are 1.0.0-rc, so confining them behind this trait keeps a
 //! breaking pre-release change from reaching the render or alert layers.
 
@@ -23,15 +23,20 @@ pub enum RadarProduct {
     CorrelationCoefficient,
     DifferentialReflectivity,
     SpectrumWidth,
+    EchoTop,
+    VerticallyIntegratedLiquid,
 }
 
 impl RadarProduct {
+    #[cfg(test)]
     pub const ALL: &'static [RadarProduct] = &[
         RadarProduct::Reflectivity,
         RadarProduct::Velocity,
         RadarProduct::CorrelationCoefficient,
         RadarProduct::DifferentialReflectivity,
         RadarProduct::SpectrumWidth,
+        RadarProduct::EchoTop,
+        RadarProduct::VerticallyIntegratedLiquid,
     ];
 
     pub fn label(self) -> &'static str {
@@ -41,6 +46,8 @@ impl RadarProduct {
             RadarProduct::CorrelationCoefficient => "corr coeff",
             RadarProduct::DifferentialReflectivity => "diff refl",
             RadarProduct::SpectrumWidth => "spectrum width",
+            RadarProduct::EchoTop => "echo top",
+            RadarProduct::VerticallyIntegratedLiquid => "VIL",
         }
     }
 
@@ -51,31 +58,48 @@ impl RadarProduct {
             RadarProduct::CorrelationCoefficient => "",
             RadarProduct::DifferentialReflectivity => "dB",
             RadarProduct::SpectrumWidth => "m/s",
+            RadarProduct::EchoTop => "km",
+            RadarProduct::VerticallyIntegratedLiquid => "kg/m2",
         }
     }
 
-    pub fn next(self) -> Self {
-        let all = Self::ALL;
-        let i = all.iter().position(|p| *p == self).unwrap_or(0);
-        all[(i + 1) % all.len()]
+    /// Whether a reading earns the right to cover the colour base. An overlay
+    /// drawing every gate would just hide it, so each product keeps only its
+    /// diagnostic tail: correlation collapse, strong radial motion, broad
+    /// spectra.
+    pub fn is_notable(self, value: f32) -> bool {
+        match self {
+            RadarProduct::Reflectivity => value >= 35.0,
+            RadarProduct::Velocity => value.abs() >= 20.0,
+            RadarProduct::CorrelationCoefficient => {
+                value < crate::radar::fetch::DEFAULT_MIN_CORRELATION
+            }
+            RadarProduct::DifferentialReflectivity => !(-1.0..3.0).contains(&value),
+            RadarProduct::SpectrumWidth => value >= 6.0,
+            RadarProduct::EchoTop => value >= 9.0,
+            RadarProduct::VerticallyIntegratedLiquid => value >= 25.0,
+        }
     }
 
     /// How a column of elevation cuts collapses to one value.
     ///
     /// Not uniform across products. Reflectivity takes the column maximum
     /// because that is composite reflectivity, which is what HRRR forecasts.
-    /// Correlation takes the minimum, because a debris signature is a
-    /// *collapse* in correlation and averaging would erase it. Velocity and
-    /// differential reflectivity come from the lowest cut, since near-ground
-    /// rotation and drop shape are what matter and aloft values would mask
-    /// them.
+    /// The dual-pol and Doppler moments take the lowest cut, since debris
+    /// lofting, rotation and drop shape are all near-ground phenomena.
+    ///
+    /// Correlation specifically must NOT take the column minimum: measured
+    /// against KOHX, that reported the single worst gate anywhere in the
+    /// column and painted ordinary rain as debris across most of the screen.
     pub fn reduction(self) -> ColumnReduction {
         match self {
-            RadarProduct::Reflectivity | RadarProduct::SpectrumWidth => ColumnReduction::Max,
-            RadarProduct::CorrelationCoefficient => ColumnReduction::Min,
-            RadarProduct::Velocity | RadarProduct::DifferentialReflectivity => {
-                ColumnReduction::LowestCut
-            }
+            RadarProduct::Reflectivity
+            | RadarProduct::SpectrumWidth
+            | RadarProduct::EchoTop
+            | RadarProduct::VerticallyIntegratedLiquid => ColumnReduction::Max,
+            RadarProduct::CorrelationCoefficient
+            | RadarProduct::Velocity
+            | RadarProduct::DifferentialReflectivity => ColumnReduction::LowestCut,
         }
     }
 }
@@ -83,7 +107,6 @@ impl RadarProduct {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnReduction {
     Max,
-    Min,
     LowestCut,
 }
 
@@ -99,6 +122,7 @@ pub trait RadarField: Send + Sync {
     fn source_label(&self) -> &str;
     fn elevation_degrees(&self) -> f32;
 
+    #[cfg(test)]
     fn dbz_at(&self, at: Coords) -> Option<f32> {
         self.value_at(at, RadarProduct::Reflectivity)
     }
@@ -182,6 +206,66 @@ pub(crate) mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ordinary_readings_are_not_notable_enough_to_cover_the_base() {
+        for (product, ordinary) in [
+            (RadarProduct::Reflectivity, 20.0),
+            (RadarProduct::Velocity, 5.0),
+            (RadarProduct::Velocity, -5.0),
+            (RadarProduct::CorrelationCoefficient, 0.99),
+            (RadarProduct::DifferentialReflectivity, 0.5),
+            (RadarProduct::SpectrumWidth, 2.0),
+            (RadarProduct::EchoTop, 4.0),
+            (RadarProduct::VerticallyIntegratedLiquid, 5.0),
+        ] {
+            assert!(!product.is_notable(ordinary), "{product:?} at {ordinary}");
+        }
+    }
+
+    #[test]
+    fn diagnostic_readings_are_notable() {
+        for (product, diagnostic) in [
+            (RadarProduct::Reflectivity, 55.0),
+            (RadarProduct::Velocity, 35.0),
+            (RadarProduct::Velocity, -35.0),
+            (RadarProduct::CorrelationCoefficient, 0.4),
+            (RadarProduct::DifferentialReflectivity, 5.0),
+            (RadarProduct::DifferentialReflectivity, -2.0),
+            (RadarProduct::SpectrumWidth, 9.0),
+            (RadarProduct::EchoTop, 12.0),
+            (RadarProduct::VerticallyIntegratedLiquid, 45.0),
+        ] {
+            assert!(product.is_notable(diagnostic), "{product:?} at {diagnostic}");
+        }
+    }
+
+    /// Velocity is signed, so a threshold applied to the raw value rather than
+    /// its magnitude would show outbound rotation and hide inbound.
+    #[test]
+    fn velocity_notability_is_symmetric_about_zero() {
+        for speed in [15.0f32, 20.0, 25.0, 60.0] {
+            assert_eq!(
+                RadarProduct::Velocity.is_notable(speed),
+                RadarProduct::Velocity.is_notable(-speed),
+                "{speed} m/s"
+            );
+        }
+    }
+
+    /// Regression: the dual-pol and Doppler moments describe the near-ground
+    /// air, so reducing them over the whole column reports a gate kilometres
+    /// above the one being asked about.
+    #[test]
+    fn near_ground_moments_read_the_lowest_cut() {
+        for product in [
+            RadarProduct::CorrelationCoefficient,
+            RadarProduct::Velocity,
+            RadarProduct::DifferentialReflectivity,
+        ] {
+            assert_eq!(product.reduction(), ColumnReduction::LowestCut, "{product:?}");
+        }
+    }
 
     #[test]
     fn new_grid_is_entirely_empty() {

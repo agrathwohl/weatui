@@ -42,6 +42,8 @@ impl Tilt {
             RadarProduct::CorrelationCoefficient => self.correlation.as_ref(),
             RadarProduct::DifferentialReflectivity => self.differential_reflectivity.as_ref(),
             RadarProduct::SpectrumWidth => self.spectrum_width.as_ref(),
+            // Derived from the reflectivity column, not carried by a sweep.
+            RadarProduct::EchoTop | RadarProduct::VerticallyIntegratedLiquid => None,
         }
     }
 }
@@ -58,6 +60,8 @@ pub struct NexradField {
     tilts: Vec<Tilt>,
     lowest_elevation: f32,
     min_correlation: f32,
+    dual_pol: bool,
+    beam_origin_msl_km: f64,
 }
 
 impl NexradField {
@@ -71,7 +75,6 @@ impl NexradField {
             .context("scan carries no site metadata, cannot georeference it")?;
 
         let mut tilts: Vec<Tilt> = Vec::new();
-        let mut lowest_elevation = f32::MAX;
         for sweep in scan.sweeps() {
             if !sweep.radials().iter().any(|r| r.reflectivity().is_some()) {
                 continue;
@@ -82,7 +85,6 @@ impl NexradField {
                 continue;
             };
             let elevation = reflectivity.elevation_degrees();
-            lowest_elevation = lowest_elevation.min(elevation);
             let build = |p| SweepField::from_radials(sweep.radials(), p);
             tilts.push(Tilt {
                 elevation,
@@ -99,12 +101,26 @@ impl NexradField {
         }
         tilts.sort_by(|a, b| a.elevation.total_cmp(&b.elevation));
 
+        // The reported tilt must be one the mask actually lets through, or the
+        // HUD names a Doppler cut that contributes no reflectivity at all.
+        let dual_pol = tilts.iter().any(|t| t.correlation.is_some());
+        let lowest_elevation = tilts
+            .iter()
+            .find(|t| !dual_pol || t.correlation.is_some())
+            .expect("dual_pol is true only when some tilt carries correlation")
+            .elevation;
+
+        let beam_origin_msl_km =
+            (site.height_meters() as f64 + site.tower_height_meters() as f64) / 1000.0;
+
         Ok(NexradField {
             site_id: site.identifier_string(),
             system: RadarCoordinateSystem::new(site),
+            dual_pol,
             tilts,
             lowest_elevation,
             min_correlation,
+            beam_origin_msl_km,
         })
     }
 
@@ -112,6 +128,17 @@ impl NexradField {
     /// must stay unmasked or it could never show the low values that are the
     /// entire reason to look at it, and masking velocity would hide rotation
     /// inside a debris ball.
+    ///
+    /// Once a volume is known to carry dual-pol, the mask fails closed: a
+    /// reflectivity gate with no correlation to vouch for it is dropped rather
+    /// than trusted. WSR-88D splits its low elevations into a surveillance cut
+    /// carrying dual-pol and a Doppler cut carrying velocity, and measured
+    /// against KOHX on a night NWS forecast 0% precipitation, 90% of the echo
+    /// on the surveillance cut failed the correlation test (mean 0.66,
+    /// biological scatter) while the Doppler cut beside it had no correlation
+    /// at all and leaked every gate into the column maximum. Failing open on
+    /// missing data means the clutter simply arrives through whichever tilt or
+    /// gate happens to lack it.
     fn tilt_value(&self, tilt: &Tilt, at: Coords, product: RadarProduct) -> Option<f32> {
         let polar = self.system.geo_to_polar(
             GeoPoint { latitude: at.lat, longitude: at.lon },
@@ -124,42 +151,128 @@ impl NexradField {
             return None;
         }
 
-        if product == RadarProduct::Reflectivity
-            && let Some(cc) = &tilt.correlation
-            && let Some((rho, cc_status)) =
-                cc.value_at_polar(polar.azimuth_degrees, polar.range_km)
-            && matches!(cc_status, GateStatus::Valid)
-            && rho < self.min_correlation
-        {
-            return None;
+        if product == RadarProduct::Reflectivity && self.dual_pol {
+            let rho = tilt
+                .correlation
+                .as_ref()
+                .and_then(|cc| cc.value_at_polar(polar.azimuth_degrees, polar.range_km))
+                .and_then(|(rho, s)| matches!(s, GateStatus::Valid).then_some(rho))?;
+            if rho < self.min_correlation {
+                return None;
+            }
         }
         Some(value)
     }
 
+    #[cfg(test)]
     pub fn tilt_count(&self) -> usize {
         self.tilts.len()
     }
 
+    #[cfg(test)]
     pub fn has_dual_pol(&self) -> bool {
-        self.tilts.iter().any(|t| t.correlation.is_some())
+        self.dual_pol
+    }
+}
+
+/// Height of the beam centre above the radar, in km, under the standard 4/3
+/// effective-earth model that accounts for atmospheric refraction.
+fn beam_height_km(range_km: f64, elevation_deg: f32) -> f64 {
+    const EFFECTIVE_EARTH_KM: f64 = 8495.0;
+    let e = (elevation_deg as f64).to_radians();
+    range_km * e.sin() + range_km * range_km / (2.0 * EFFECTIVE_EARTH_KM)
+}
+
+impl NexradField {
+    /// Highest altitude carrying meaningful echo, the standard 18 dBZ contour.
+    ///
+    /// The lowest tilt is deliberately not a floor: a storm whose top is below
+    /// the lowest beam still has a top, and reporting the beam height would
+    /// invent one.
+    fn echo_top_km(&self, at: Coords) -> Option<f32> {
+        const ECHO_TOP_DBZ: f32 = 18.0;
+        let mut top: Option<f32> = None;
+        for tilt in &self.tilts {
+            let Some(dbz) = self.tilt_value(tilt, at, RadarProduct::Reflectivity) else {
+                continue;
+            };
+            if dbz < ECHO_TOP_DBZ {
+                continue;
+            }
+            let polar = self.system.geo_to_polar(
+                GeoPoint { latitude: at.lat, longitude: at.lon },
+                tilt.elevation,
+            );
+            // HRRR RETOP is metres above sea level; reporting height above
+            // the radar instead would jump the same storm's top by the site
+            // elevation whenever the timeline crosses observed to forecast.
+            let h = (beam_height_km(polar.range_km, tilt.elevation)
+                + self.beam_origin_msl_km) as f32;
+            if top.is_none_or(|t| h > t) {
+                top = Some(h);
+            }
+        }
+        top
+    }
+
+    /// Vertically integrated liquid, kg/m^2.
+    ///
+    /// The operational formula integrates 3.44e-6 * Z^(4/7) over the column,
+    /// with Z capped at 56 dBZ so that hail, which is a far stronger scatterer
+    /// than the rain the relation was derived for, cannot inflate the total.
+    fn vil(&self, at: Coords) -> Option<f32> {
+        const HAIL_CAP_DBZ: f32 = 56.0;
+        let mut layers: Vec<(f64, f64)> = Vec::new();
+        for tilt in &self.tilts {
+            let Some(dbz) = self.tilt_value(tilt, at, RadarProduct::Reflectivity) else {
+                continue;
+            };
+            let polar = self.system.geo_to_polar(
+                GeoPoint { latitude: at.lat, longitude: at.lon },
+                tilt.elevation,
+            );
+            let z = 10f64.powf((dbz.min(HAIL_CAP_DBZ) as f64) / 10.0);
+            layers.push((beam_height_km(polar.range_km, tilt.elevation), z));
+        }
+        if layers.len() < 2 {
+            return None;
+        }
+        layers.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let total: f64 = layers
+            .windows(2)
+            .map(|w| {
+                let dh_m = (w[1].0 - w[0].0) * 1000.0;
+                3.44e-6 * ((w[0].1 + w[1].1) / 2.0).powf(4.0 / 7.0) * dh_m
+            })
+            .sum();
+        (total > 0.0).then_some(total as f32)
     }
 }
 
 impl RadarField for NexradField {
     fn value_at(&self, at: Coords, product: RadarProduct) -> Option<f32> {
+        match product {
+            RadarProduct::EchoTop => return self.echo_top_km(at),
+            RadarProduct::VerticallyIntegratedLiquid => return self.vil(at),
+            _ => {}
+        }
         let mut values = self
             .tilts
             .iter()
             .filter_map(|tilt| self.tilt_value(tilt, at, product));
         match product.reduction() {
             ColumnReduction::Max => values.reduce(f32::max),
-            ColumnReduction::Min => values.reduce(f32::min),
             ColumnReduction::LowestCut => values.next(),
         }
     }
 
     fn supports(&self, product: RadarProduct) -> bool {
-        self.tilts.iter().any(|t| t.moment(product).is_some())
+        match product {
+            RadarProduct::EchoTop | RadarProduct::VerticallyIntegratedLiquid => {
+                self.tilts.len() >= 2
+            }
+            _ => self.tilts.iter().any(|t| t.moment(product).is_some()),
+        }
     }
 
     fn source_label(&self) -> &str {
@@ -294,5 +407,77 @@ mod tests {
             stamps.windows(2).all(|w| w[0] < w[1]),
             "backfill must be ordered oldest first: {stamps:?}"
         );
+    }
+
+    /// The clutter mask must fail closed. Every reflectivity value a dual-pol
+    /// volume reports has to be backed by a valid correlation gate above the
+    /// threshold; anything else is how biological scatter reached the screen.
+    /// `cargo test clutter_mask_fails_closed -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn clutter_mask_fails_closed_on_every_gate_it_reports() {
+        let (_at, field) = latest_field("KOHX").await.expect("KOHX");
+        assert!(field.dual_pol, "KOHX is a dual-pol site");
+
+        let home = Coords { lat: 35.9527, lon: -87.3085 };
+        let (mut reported, mut unvouched) = (0usize, 0usize);
+        let mut lat = home.lat - 1.5;
+        while lat < home.lat + 1.5 {
+            let mut lon = home.lon - 1.5;
+            while lon < home.lon + 1.5 {
+                let at = Coords { lat, lon };
+                for tilt in &field.tilts {
+                    if field.tilt_value(tilt, at, RadarProduct::Reflectivity).is_none() {
+                        continue;
+                    }
+                    reported += 1;
+                    let polar = field.system.geo_to_polar(
+                        GeoPoint { latitude: at.lat, longitude: at.lon },
+                        tilt.elevation,
+                    );
+                    let vouched = tilt
+                        .correlation
+                        .as_ref()
+                        .and_then(|cc| cc.value_at_polar(polar.azimuth_degrees, polar.range_km))
+                        .is_some_and(|(rho, s)| {
+                            matches!(s, GateStatus::Valid) && rho >= field.min_correlation
+                        });
+                    if !vouched {
+                        unvouched += 1;
+                    }
+                }
+                lon += 0.05;
+            }
+            lat += 0.05;
+        }
+        eprintln!("{reported} reflectivity gates reported, {unvouched} without a valid CC vouching");
+        assert_eq!(unvouched, 0, "{unvouched} gates bypassed the clutter mask");
+    }
+
+    /// Echo top and VIL exist on both sides of the timeline, so the observed
+    /// half must produce them too or the handoff still goes blank.
+    /// `cargo test derived_products -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn derived_products_are_available_from_the_observed_volume() {
+        let (_at, field) = latest_field("KOHX").await.expect("KOHX");
+        for product in [RadarProduct::EchoTop, RadarProduct::VerticallyIntegratedLiquid] {
+            assert!(field.supports(product), "{product:?} unsupported");
+            let (mut n, mut peak) = (0usize, f32::MIN);
+            let mut lat = 34.8;
+            while lat < 37.2 {
+                let mut lon = -88.5;
+                while lon < -86.1 {
+                    if let Some(v) = field.value_at(Coords { lat, lon }, product) {
+                        n += 1;
+                        peak = peak.max(v);
+                    }
+                    lon += 0.05;
+                }
+                lat += 0.05;
+            }
+            eprintln!("{:>10}: {n} cells, peak {peak:.1} {}", product.label(), product.units());
+            assert!(n > 0, "{product:?} produced nothing from a live volume");
+        }
     }
 }

@@ -1,4 +1,5 @@
 mod alert;
+mod conditions;
 mod config;
 mod daemon;
 mod geo;

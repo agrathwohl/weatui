@@ -55,6 +55,16 @@ impl FrameRing {
     /// Frames arriving while the user is scrubbing history must not yank the
     /// view forward, so the cursor only tracks the newest frame when following.
     pub fn push(&mut self, frame: RadarFrame) {
+        // The realtime volume is re-polled while it assembles, so the same
+        // captured_at arrives repeatedly with more chunks each time. Replacing
+        // keeps the fullest assembly; inserting would stutter playback with
+        // duplicates and evict real history.
+        if let Some(existing) =
+            self.frames.iter_mut().find(|f| f.captured_at == frame.captured_at)
+        {
+            *existing = frame;
+            return;
+        }
         let at = self
             .frames
             .iter()
@@ -77,12 +87,23 @@ impl FrameRing {
     /// Projections are always the newest entries. They must be discarded before
     /// a fresh observation is appended, otherwise last cycle's extrapolation
     /// would sit earlier in the track than data observed after it.
+    /// Projected frames are not necessarily contiguous at the back: a fresh
+    /// observation can land after an overtaken forecast frame, so popping from
+    /// the back would leave stale model output interleaved with real radar.
     pub fn drop_projected(&mut self) {
-        while self.frames.back().is_some_and(|f| f.projected) {
-            self.frames.pop_back();
-        }
+        let cursor = self.cursor;
+        let mut index = 0usize;
+        let mut removed_at_or_before_cursor = 0usize;
+        self.frames.retain(|f| {
+            if f.projected && index <= cursor {
+                removed_at_or_before_cursor += 1;
+            }
+            index += 1;
+            !f.projected
+        });
         let last = self.frames.len().saturating_sub(1);
-        if self.cursor > last {
+        self.cursor = cursor.saturating_sub(removed_at_or_before_cursor).min(last);
+        if self.follow_live {
             self.cursor = last;
         }
     }
@@ -311,6 +332,50 @@ mod tests {
         assert!(!r.is_playing());
         r.advance_playback();
         assert_eq!(r.cursor(), 0);
+    }
+
+    /// Regression: a fresh observation can land after an overtaken forecast
+    /// frame, so dropping only from the back left stale model output
+    /// interleaved with real radar forever.
+    #[test]
+    fn drop_projected_removes_forecasts_buried_between_observations() {
+        let mut r = FrameRing::new(10);
+        r.push(frame(0));
+        r.push(projected_frame(5));
+        r.push(frame(10));
+        r.push(projected_frame(15));
+        r.push(frame(20));
+
+        r.drop_projected();
+        assert_eq!(r.len(), 3);
+        assert!(
+            r.frames().all(|f| !f.projected),
+            "a projected frame survived between observations"
+        );
+    }
+
+    /// Regression: the realtime volume is re-polled while it assembles, and
+    /// each poll used to insert a duplicate frame at the same captured_at,
+    /// stuttering playback and evicting real history.
+    #[test]
+    fn pushing_the_same_captured_at_replaces_rather_than_duplicates() {
+        let mut r = FrameRing::new(10);
+        r.push(frame(0));
+        r.push(frame(5));
+        r.push(frame(5));
+        r.push(frame(5));
+        assert_eq!(r.len(), 2, "re-polling one volume must not grow the ring");
+    }
+
+    #[test]
+    fn replacement_keeps_the_newer_assembly_of_the_volume() {
+        let mut r = FrameRing::new(10);
+        let mut early = frame(5);
+        early.projected = true;
+        r.push(early);
+        r.push(frame(5));
+        assert_eq!(r.len(), 1);
+        assert!(r.frames().all(|f| !f.projected), "the later push must win");
     }
 
     fn projected_frame(minute: u32) -> RadarFrame {
