@@ -94,6 +94,22 @@ pub fn angular_difference_deg(a: f64, b: f64) -> f64 {
     if d > 180.0 { 360.0 - d } else { d }
 }
 
+pub fn compass_16(degrees: f32) -> &'static str {
+    const POINTS: [&str; 16] = [
+        "N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW",
+        "NW", "NNW",
+    ];
+    POINTS[(((degrees.rem_euclid(360.0) + 11.25) / 22.5) as usize) % 16]
+}
+
+/// Compass name of the direction from one point toward another. The zonal
+/// term shrinks with latitude or east-west directions would overweight.
+pub fn compass_bearing(from: Coords, to: Coords) -> &'static str {
+    let dlon = (to.lon - from.lon) * from.lat.to_radians().cos();
+    let dlat = to.lat - from.lat;
+    compass_16(dlon.atan2(dlat).to_degrees() as f32)
+}
+
 pub fn nearest_radar_site(from: Coords) -> Option<RadarSite> {
     radar_table()
         .iter()

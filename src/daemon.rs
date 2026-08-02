@@ -115,7 +115,7 @@ pub async fn run(cfg: Config, home: Coords, echo_to_stdout: bool) -> Result<()> 
             if echo_to_stdout {
                 println!("{} :: {}", notify::summary_for(n), notify::body_for(n, eta));
             }
-            if let Err(e) = notify::send(n, &cfg.alerts.notify, eta) {
+            if let Err(e) = notify::dispatch(n, &cfg.alerts.notify, &cfg.alerts.scripts, eta) {
                 eprintln!("weatui: notification failed: {e:#}");
             }
         }

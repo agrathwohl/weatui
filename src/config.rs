@@ -66,6 +66,33 @@ pub struct Alerts {
     /// Silence must never be indistinguishable from safety.
     #[serde(default = "default_stale_after")]
     pub stale_after_secs: u64,
+    #[serde(default)]
+    pub scripts: Scripts,
+}
+
+/// Absolute path of an executable to run when an alert of that tier fires,
+/// in addition to the desktop notification — or instead of it, when the
+/// tier's `[alerts.notify]` level is set to `"none"`.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Scripts {
+    pub lethal: Option<String>,
+    pub severe: Option<String>,
+    pub watch: Option<String>,
+}
+
+impl Scripts {
+    pub fn for_tier(&self, tier: crate::alert::filter::ThreatTier) -> Option<&str> {
+        use crate::alert::filter::ThreatTier;
+        match tier {
+            ThreatTier::Lethal => self.lethal.as_deref(),
+            ThreatTier::Severe => self.severe.as_deref(),
+            ThreatTier::Watch => self.watch.as_deref(),
+        }
+    }
+
+    pub fn all(&self) -> impl Iterator<Item = &str> {
+        [&self.lethal, &self.severe, &self.watch].into_iter().flatten().map(|s| s.as_str())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -81,6 +108,9 @@ pub struct Tiers {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Urgency {
+    /// No desktop notification for this tier — for running a script INSTEAD
+    /// OF the notification daemon rather than in addition to it.
+    None,
     Low,
     Normal,
     Critical,
@@ -89,6 +119,7 @@ pub enum Urgency {
 impl Urgency {
     pub fn as_notify_send_arg(self) -> &'static str {
         match self {
+            Urgency::None => unreachable!("dispatch skips notify-send at Urgency::None"),
             Urgency::Low => "low",
             Urgency::Normal => "normal",
             Urgency::Critical => "critical",
@@ -129,6 +160,12 @@ pub enum Colormap {
 pub struct Render {
     #[serde(default = "default_colormap")]
     pub colormap: Colormap,
+    /// Temperatures at or below this render blue in the HUD.
+    #[serde(default = "default_cold_below")]
+    pub cold_below_f: f32,
+    /// Temperatures at or above this render red in the HUD.
+    #[serde(default = "default_hot_above")]
+    pub hot_above_f: f32,
 }
 
 fn default_poll_interval() -> u64 {
@@ -168,6 +205,12 @@ fn default_refresh() -> u64 {
 fn default_colormap() -> Colormap {
     Colormap::Threat
 }
+fn default_cold_below() -> f32 {
+    32.0
+}
+fn default_hot_above() -> f32 {
+    95.0
+}
 
 impl Default for Alerts {
     fn default() -> Self {
@@ -177,6 +220,7 @@ impl Default for Alerts {
             tiers: Tiers::default(),
             notify: NotifyLevels::default(),
             stale_after_secs: default_stale_after(),
+            scripts: Scripts::default(),
         }
     }
 }
@@ -215,6 +259,8 @@ impl Default for Render {
     fn default() -> Self {
         Self {
             colormap: default_colormap(),
+            cold_below_f: default_cold_below(),
+            hot_above_f: default_hot_above(),
         }
     }
 }
@@ -244,6 +290,22 @@ impl Config {
     /// A14: an unusable location must be an actionable error, never a panic.
     fn validate(&self, path_for_errors: &str) -> Result<()> {
         let path = path_for_errors;
+        if self.render.cold_below_f >= self.render.hot_above_f {
+            bail!(
+                "{path}: [render] cold_below_f ({}) must be below hot_above_f ({})",
+                self.render.cold_below_f,
+                self.render.hot_above_f
+            );
+        }
+        for script in self.alerts.scripts.all() {
+            if !script.starts_with('/') {
+                bail!(
+                    "{path}: [alerts.scripts] paths must be absolute, got {script:?}; \
+                     a relative path would resolve against whatever directory \
+                     weatui happened to start in"
+                );
+            }
+        }
         if self.location.explicit_coords().is_none() && self.location.zip.is_none() {
             bail!(
                 "{path}: [location] must set either `zip` or both `lat` and `lon`\n\n\
@@ -273,6 +335,32 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alert_scripts_parse_per_tier_and_none_silences_the_daemon() {
+        let cfg = Config::parse(
+            "[location]\nzip = \"73019\"\n\n             [alerts.notify]\nwatch = \"none\"\n\n             [alerts.scripts]\nlethal = \"/usr/local/bin/siren.sh\"\nwatch = \"/opt/hooks/log.sh\"\n",
+            "/tmp/c.toml",
+        )
+        .unwrap();
+        assert_eq!(cfg.alerts.scripts.lethal.as_deref(), Some("/usr/local/bin/siren.sh"));
+        assert_eq!(cfg.alerts.scripts.severe, None);
+        assert_eq!(cfg.alerts.scripts.watch.as_deref(), Some("/opt/hooks/log.sh"));
+        assert_eq!(cfg.alerts.notify.watch, Urgency::None);
+        assert_eq!(cfg.alerts.notify.lethal, Urgency::Critical, "default untouched");
+    }
+
+    #[test]
+    fn relative_script_paths_are_rejected_at_load() {
+        let err = Config::parse(
+            "[location]\nzip = \"73019\"\n\n[alerts.scripts]\nsevere = \"hooks/beep.sh\"\n",
+            "/tmp/c.toml",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("absolute"), "{err}");
+        assert!(err.contains("hooks/beep.sh"), "{err}");
+    }
 
     #[test]
     fn zip_only_is_valid_and_defaults_apply() {

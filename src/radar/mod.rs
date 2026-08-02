@@ -4,6 +4,7 @@
 //! The nexrad crates are 1.0.0-rc, so confining them behind this trait keeps a
 //! breaking pre-release change from reaching the render or alert layers.
 
+pub mod cells;
 pub mod fetch;
 pub mod hrrr;
 pub mod grid;

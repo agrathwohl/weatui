@@ -103,6 +103,21 @@ impl PixelOverlay {
         }
     }
 
+    /// Corner brackets around a storm cell so the marker never obscures the
+    /// echo it is pointing at.
+    pub fn draw_cell_marker(&mut self, at: Coords, viewport: &Viewport, rgb: Rgb, selected: bool) {
+        let (cx, cy) = viewport.project_to_nearest_pixel(at);
+        let r: i64 = if selected { 6 } else { 4 };
+        let arm: i64 = if selected { 3 } else { 2 };
+        for (sx, sy) in [(-1i64, -1i64), (1, -1), (-1, 1), (1, 1)] {
+            let (px, py) = (cx + sx * r, cy + sy * r);
+            for d in 0..arm {
+                self.set(px - sx * d, py, rgb);
+                self.set(px, py - sy * d, rgb);
+            }
+        }
+    }
+
     pub fn draw_distance_rings(
         &mut self,
         centre: Coords,

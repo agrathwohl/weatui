@@ -99,13 +99,20 @@ lethal = ["TO.W", "EW.W", "FF.W"]   # tornado, extreme wind, flash flood warning
 severe = ["SV.W", "SQ.W", "DS.W"]   # severe thunderstorm, squall, dust storm
 watch  = ["TO.A", "SV.A"]           # tornado / severe thunderstorm watches
 
-[alerts.notify]             # notify-send urgency per tier: low / normal / critical
-lethal = "critical"
-severe = "critical"
-watch  = "normal"
+[alerts.notify]             # notify-send urgency per tier:
+lethal = "critical"         #   none / low / normal / critical
+severe = "critical"         #   "none" silences the desktop daemon for that
+watch  = "normal"           #   tier (e.g. to run only a script instead)
+
+[alerts.scripts]            # absolute path of an executable to run when an
+# lethal = "/home/you/bin/siren.sh"      # alert of that tier fires, in
+# severe = "/home/you/bin/log-alert.sh"  # addition to the notification (or
+# watch  = "/home/you/bin/log-alert.sh"  # instead, with notify = "none")
 
 [render]
 colormap = "threat"  # "threat" (high-contrast), "nws" (classic), "mono"
+cold_below_f = 32.0  # temperatures at/below render blue in the HUD
+hot_above_f = 95.0   # temperatures at/above render red
 ```
 
 ## Run
@@ -170,6 +177,13 @@ example mako's `[urgency=critical]` section):
 - Notification text is plain ASCII on purpose: your notification daemon's
   font may not carry Nerd Font glyphs, and tofu in a tornado warning is
   unacceptable.
+- Each tier can also run a **custom script** (`[alerts.scripts]`): the
+  executable is spawned with the tier and event as arguments and the full
+  alert in its environment — `WEATUI_TIER`, `WEATUI_EVENT`,
+  `WEATUI_HEADLINE`, `WEATUI_AREA`, `WEATUI_ETA_MINUTES`. Scripts run in
+  addition to the desktop notification, or instead of it when the tier's
+  notify level is `"none"`. Script and notification fail independently —
+  a broken script never silences a warning.
 - If no poll of api.weather.gov has succeeded for `stale_after_secs`, a
   critical **ALERT FEED STALE** notification tells you that you are *not*
   currently protected — a dead poller must never be indistinguishable from

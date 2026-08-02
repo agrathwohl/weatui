@@ -71,6 +71,9 @@ const HELP: &str = "\
    1 2 3      base: reflectivity / echo top / VIL
    4 5 6 7    toggle: velocity / debris CC / ZDR / spec width
 
+ CELLS
+   n N        cycle storm cells (map follows)
+
  FORECAST
    f          cycle horizon: 2h / 6h / 18h
 
@@ -122,6 +125,8 @@ impl ForecastHorizon {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     CycleForecast,
+    CellNext,
+    CellPrev,
     SelectProduct(usize),
     ToggleProductOverlay(usize),
     PanWest,
@@ -180,6 +185,8 @@ pub fn resolve_key(pending: &mut Option<char>, key: KeyEvent) -> Action {
         KeyCode::Char('>') => Action::Faster,
         KeyCode::Char('<') => Action::Slower,
         KeyCode::Char('f') => Action::CycleForecast,
+        KeyCode::Char('n') => Action::CellNext,
+        KeyCode::Char('N') => Action::CellPrev,
         KeyCode::Char(c @ '1'..='3') => Action::SelectProduct(c as usize - '1' as usize),
         KeyCode::Char(c @ '4'..='7') => Action::ToggleProductOverlay(c as usize - '4' as usize),
         KeyCode::Char('?') => Action::ToggleHelp,
@@ -201,6 +208,7 @@ pub struct App {
     home: Coords,
     site: RadarSite,
     colormap: Colormap,
+    temp_limits: (f32, f32),
     tz: chrono_tz::Tz,
     pending: Option<char>,
     playback: Duration,
@@ -209,6 +217,10 @@ pub struct App {
     horizon: ForecastHorizon,
     horizon_tx: Option<tokio::sync::watch::Sender<ForecastHorizon>>,
     conditions: Option<crate::conditions::Conditions>,
+    obs_history: Vec<crate::conditions::Conditions>,
+    hourly: Vec<crate::conditions::HourlyForecast>,
+    cells: Vec<crate::radar::cells::StormCell>,
+    selected_cell: Option<usize>,
     show_help: bool,
     quit: bool,
     status: String,
@@ -235,6 +247,7 @@ impl App {
             home,
             site,
             colormap: cfg.render.colormap,
+            temp_limits: (cfg.render.cold_below_f, cfg.render.hot_above_f),
             tz,
             pending: None,
             playback: Duration::from_millis(450),
@@ -243,6 +256,10 @@ impl App {
             horizon: ForecastHorizon::Near,
             horizon_tx: None,
             conditions: None,
+            obs_history: Vec::new(),
+            hourly: Vec::new(),
+            cells: Vec::new(),
+            selected_cell: None,
             show_help: false,
             quit: false,
             status: format!(
@@ -279,6 +296,18 @@ impl App {
             }
             Action::Slower => {
                 self.playback = self.playback.mul_f64(1.4).min(Duration::from_millis(4000))
+            }
+            Action::CellNext | Action::CellPrev if self.cells.is_empty() => {
+                self.status = "no storm cells detected".to_string();
+            }
+            Action::CellNext => {
+                let next = self.selected_cell.map_or(0, |i| (i + 1) % self.cells.len());
+                self.select_cell(next);
+            }
+            Action::CellPrev => {
+                let len = self.cells.len();
+                let prev = self.selected_cell.map_or(len - 1, |i| (i + len - 1) % len);
+                self.select_cell(prev);
             }
             Action::SelectProduct(i) => {
                 if let Some(p) = BASE_PRODUCTS.get(i).copied() {
@@ -355,7 +384,7 @@ fn nearest_echo_km(
             {
                 let km = crate::geo::haversine_km(home, at);
                 if best.is_none_or(|(d, _)| km < d) {
-                    best = Some((km, compass(home, at)));
+                    best = Some((km, crate::geo::compass_bearing(home, at)));
                 }
             }
             lon += 0.25;
@@ -363,15 +392,6 @@ fn nearest_echo_km(
         lat += 0.25;
     }
     best
-}
-
-fn compass(from: Coords, to: Coords) -> &'static str {
-    const POINTS: [&str; 8] = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
-    let bearing = (to.lon - from.lon)
-        .atan2(to.lat - from.lat)
-        .to_degrees()
-        .rem_euclid(360.0);
-    POINTS[(((bearing + 22.5) / 45.0) as usize) % 8]
 }
 
 impl App {
@@ -423,6 +443,41 @@ impl App {
         }
     }
 
+    fn select_cell(&mut self, index: usize) {
+        self.selected_cell = Some(index);
+        self.viewport.centre = self.cells[index].centroid;
+    }
+
+    /// The current-conditions block always shows now; this picks what the
+    /// displayed frame's own moment looked or will look like. The newest
+    /// observed frame IS now, so it gets nothing extra.
+    fn frame_conditions(
+        &self,
+    ) -> Option<(chrono::DateTime<chrono::Utc>, crate::conditions::FrameConditions<'_>)> {
+        let newest_observed = self
+            .ring
+            .frames()
+            .filter(|f| !f.projected)
+            .last()
+            .map(|f| f.captured_at);
+        let f = self.ring.current()?;
+        if !f.projected && Some(f.captured_at) == newest_observed {
+            return None;
+        }
+        let fc = if f.projected {
+            crate::conditions::FrameConditions::Forecast(crate::conditions::nearest_hourly(
+                &self.hourly,
+                f.captured_at,
+            )?)
+        } else {
+            crate::conditions::FrameConditions::Observed(crate::conditions::nearest_observation(
+                &self.obs_history,
+                f.captured_at,
+            )?)
+        };
+        Some((f.captured_at, fc))
+    }
+
     fn build_overlay(&self, width: usize, height: usize) -> PixelOverlay {
         let mut overlay = PixelOverlay::new(width, height);
         overlay.draw_distance_rings(self.home, DISTANCE_RING_KM, &self.viewport, DISTANCE_RING);
@@ -440,6 +495,30 @@ impl App {
                     overlay.draw_ring(ring, &self.viewport, colour);
                 }
             }
+        }
+        // Cell markers describe the newest observed volume; on history or
+        // forecast frames they would sit on echo they do not belong to.
+        let newest_observed = self
+            .ring
+            .frames()
+            .filter(|f| !f.projected)
+            .last()
+            .map(|f| f.captured_at);
+        let on_live_frame = self
+            .ring
+            .current()
+            .is_some_and(|f| !f.projected && Some(f.captured_at) == newest_observed);
+        for (i, cell) in self.cells.iter().enumerate().filter(|_| on_live_frame) {
+            overlay.draw_cell_marker(
+                cell.centroid,
+                &self.viewport,
+                if self.selected_cell == Some(i) {
+                    HOME_MARKER
+                } else {
+                    crate::render::hud::threat_rgb(cell.threat)
+                },
+                self.selected_cell == Some(i),
+            );
         }
         overlay.draw_home(self.home, &self.viewport, HOME_MARKER);
         overlay
@@ -545,6 +624,10 @@ impl App {
                 peak_dbz: grid.value_range().map(|(_, hi)| hi),
                 peak_units: self.product.units(),
                 conditions: self.conditions.as_ref(),
+                frame_conditions: self.frame_conditions(),
+                temp_limits: self.temp_limits,
+                cells: &self.cells,
+                selected_cell: self.selected_cell,
                 tz: self.tz,
                 eta_for: &eta,
             },
@@ -588,6 +671,9 @@ struct AlertSnapshot {
     active: Vec<crate::alert::state::ActiveAlert>,
     stale: bool,
     stale_secs: u64,
+    /// A typo'd script path would otherwise fail on every alert, forever,
+    /// with no feedback anywhere in the TUI.
+    dispatch_error: Option<String>,
 }
 
 struct RadarUpdate {
@@ -596,6 +682,9 @@ struct RadarUpdate {
     /// `Some` while history is still loading, carrying "n/total" for the
     /// status line. Projections are suppressed until it is `None`.
     backfill: Option<String>,
+    /// `Some` only for the live volume: backfill frames are history, and
+    /// listing their storm cells would present stale threats as current.
+    cells: Option<Vec<crate::radar::cells::StormCell>>,
 }
 
 struct ForecastUpdate {
@@ -613,7 +702,17 @@ enum Update {
     Alerts(Box<AlertSnapshot>),
     Radar(Result<RadarUpdate>),
     Forecast(Result<Box<ForecastUpdate>>),
-    Conditions(Result<Box<crate::conditions::Conditions>>),
+    Conditions(Box<ConditionsUpdate>),
+}
+
+/// Everything one conditions cycle learned. Fields the cycle failed to fetch
+/// stay empty and the last good values remain on screen, with the failure in
+/// `error` for the status line.
+struct ConditionsUpdate {
+    current: Option<crate::conditions::Conditions>,
+    history: Vec<crate::conditions::Conditions>,
+    hourly: Vec<crate::conditions::HourlyForecast>,
+    error: Option<String>,
 }
 
 pub async fn run(cfg: Config, home: Coords) -> Result<()> {
@@ -632,40 +731,66 @@ pub async fn run(cfg: Config, home: Coords) -> Result<()> {
 
     let conditions_tx = tx.clone();
     tokio::spawn(async move {
-        let client = match reqwest::Client::builder()
+        let Ok(client) = reqwest::Client::builder()
             .user_agent(crate::alert::poll::USER_AGENT)
             .timeout(Duration::from_secs(15))
             .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = conditions_tx.send(Update::Conditions(Err(e.into()))).await;
-                return;
-            }
+        else {
+            return;
         };
         // Discovery failure is retried each cycle, and a station whose
         // observations endpoint fails is rotated out for the next-nearest one
         // instead of being retried forever with an empty panel.
+        let mut urls: Option<crate::conditions::PointsUrls> = None;
         let mut stations: Vec<String> = Vec::new();
         let mut which = 0usize;
         loop {
-            if stations.is_empty() {
-                stations = match crate::conditions::nearest_stations(&client, home).await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let _ = conditions_tx.send(Update::Conditions(Err(e))).await;
-                        Vec::new()
-                    }
-                };
+            let mut update = ConditionsUpdate {
+                current: None,
+                history: Vec::new(),
+                hourly: Vec::new(),
+                error: None,
+            };
+            let note = |e: anyhow::Error, update: &mut ConditionsUpdate| {
+                if update.error.is_none() {
+                    update.error = Some(format!("{e:#}"));
+                }
+            };
+            if urls.is_none() {
+                match crate::conditions::points_urls(&client, home).await {
+                    Ok(u) => urls = Some(u),
+                    Err(e) => note(e, &mut update),
+                }
             }
-            if let Some(id) = stations.get(which % stations.len().max(1)) {
-                let result = crate::conditions::latest(&client, id).await;
-                if result.is_err() {
-                    which += 1;
+            if let Some(u) = &urls {
+                if stations.is_empty() {
+                    match crate::conditions::nearest_stations(&client, &u.observation_stations)
+                        .await
+                    {
+                        Ok(s) => stations = s,
+                        Err(e) => note(e, &mut update),
+                    }
                 }
-                if conditions_tx.send(Update::Conditions(result.map(Box::new))).await.is_err() {
-                    return;
+                if let Some(id) = stations.get(which % stations.len().max(1)) {
+                    match crate::conditions::latest(&client, id).await {
+                        Ok(c) => update.current = Some(c),
+                        Err(e) => {
+                            which += 1;
+                            note(e, &mut update);
+                        }
+                    }
+                    match crate::conditions::observation_history(&client, id).await {
+                        Ok(h) => update.history = h,
+                        Err(e) => note(e, &mut update),
+                    }
                 }
+                match crate::conditions::hourly_forecast(&client, &u.forecast_hourly).await {
+                    Ok(h) => update.hourly = h,
+                    Err(e) => note(e, &mut update),
+                }
+            }
+            if conditions_tx.send(Update::Conditions(Box::new(update))).await.is_err() {
+                return;
             }
             tokio::time::sleep(Duration::from_secs(300)).await;
         }
@@ -674,14 +799,18 @@ pub async fn run(cfg: Config, home: Coords) -> Result<()> {
     let alert_tx = tx.clone();
     let mut engine = AlertEngine::new(&cfg, home)?;
     let notify_levels = cfg.alerts.notify.clone();
+    let notify_scripts = cfg.alerts.scripts.clone();
     let stale_after = cfg.alerts.stale_after_secs;
     tokio::spawn(async move {
         loop {
             let tick = engine.tick().await;
 
+            let mut dispatch_error = None;
             for n in &tick.fresh {
                 let eta = engine.eta_minutes(n);
-                let _ = notify::send(n, &notify_levels, eta);
+                if let Err(e) = notify::dispatch(n, &notify_levels, &notify_scripts, eta) {
+                    dispatch_error = Some(format!("{e:#}"));
+                }
             }
             if tick.went_stale {
                 let _ = notify::send_stale_warning(engine.stale_elapsed());
@@ -691,6 +820,7 @@ pub async fn run(cfg: Config, home: Coords) -> Result<()> {
             let snapshot = AlertSnapshot {
                 tick,
                 active: engine.state.active().cloned().collect(),
+                dispatch_error,
                 stale: engine.state.is_stale(crate::daemon::now_epoch(), stale_after),
                 stale_secs,
             };
@@ -705,6 +835,7 @@ pub async fn run(cfg: Config, home: Coords) -> Result<()> {
     let radar_tx = tx.clone();
     let refresh = Duration::from_secs(cfg.radar.refresh_secs.max(30));
     let radar_site = site_id.clone();
+    let site_coords = app.site.coords;
     let history = cfg.radar.frames;
     tokio::spawn(async move {
         // Without this the ring holds a single volume and there is nothing to
@@ -715,7 +846,7 @@ pub async fn run(cfg: Config, home: Coords) -> Result<()> {
                 let total = ids.len();
                 for (i, id) in ids.into_iter().enumerate() {
                     let loaded = fetch::archived_field(id).await.map(|(at, f)| {
-                        RadarUpdate { observed_at: at, field: Box::new(f), backfill: None }
+                        RadarUpdate { observed_at: at, field: Box::new(f), backfill: None, cells: None }
                     });
                     let progress = format!("backfill {}/{total}", i + 1);
                     if radar_tx
@@ -735,7 +866,10 @@ pub async fn run(cfg: Config, home: Coords) -> Result<()> {
         loop {
             let result = fetch::latest_field(&radar_site)
                 .await
-                .map(|(at, f)| RadarUpdate { observed_at: at, field: Box::new(f), backfill: None });
+                .map(|(at, f)| {
+                    let cells = crate::radar::cells::scan(&f, site_coords, home);
+                    RadarUpdate { observed_at: at, field: Box::new(f), backfill: None, cells: Some(cells) }
+                });
             if radar_tx.send(Update::Radar(result)).await.is_err() {
                 return;
             }
@@ -846,6 +980,10 @@ async fn event_loop(
                     app.active = snapshot.active;
                     app.stale = snapshot.stale;
                     app.stale_secs = snapshot.stale_secs;
+                    if let Some(err) = snapshot.dispatch_error {
+                        app.status = format!("alert dispatch failed: {err}");
+                        continue;
+                    }
                     app.status = match snapshot.tick.poll_error {
                         Some(err) => format!("alert poll failed: {err}"),
                         None => format!(
@@ -856,7 +994,12 @@ async fn event_loop(
                         ),
                     };
                 }
-                Update::Radar(Ok(RadarUpdate { observed_at, field, backfill })) => {
+                Update::Radar(Ok(RadarUpdate { observed_at, field, backfill, cells })) => {
+                    if let Some(cells) = cells {
+                        app.selected_cell =
+                            app.selected_cell.filter(|i| *i < cells.len());
+                        app.cells = cells;
+                    }
                     let observed: Arc<dyn RadarField> = Arc::from(field);
                     let tilt = observed.elevation_degrees();
                     app.ring.push(RadarFrame {
@@ -900,9 +1043,19 @@ async fn event_loop(
                 Update::Forecast(Err(e)) => {
                     app.status = format!("forecast unavailable: {e:#}");
                 }
-                Update::Conditions(Ok(c)) => app.conditions = Some(*c),
-                Update::Conditions(Err(e)) => {
-                    app.status = format!("conditions unavailable: {e:#}");
+                Update::Conditions(u) => {
+                    if u.current.is_some() {
+                        app.conditions = u.current;
+                    }
+                    if !u.history.is_empty() {
+                        app.obs_history = u.history;
+                    }
+                    if !u.hourly.is_empty() {
+                        app.hourly = u.hourly;
+                    }
+                    if let Some(e) = u.error {
+                        app.status = format!("conditions unavailable: {e}");
+                    }
                 }
                 Update::Radar(Err(e)) => {
                     app.status = format!("radar fetch failed: {e:#}");
@@ -1115,14 +1268,14 @@ mod tests {
     }
 
     #[test]
-    fn compass_names_the_direction_of_the_nearest_echo() {
+    fn the_banner_compass_names_the_direction_of_the_nearest_echo() {
+        use crate::geo::compass_bearing;
         let home = Coords { lat: 36.0, lon: -87.0 };
-        assert_eq!(compass(home, Coords { lat: 38.0, lon: -87.0 }), "N");
-        assert_eq!(compass(home, Coords { lat: 34.0, lon: -87.0 }), "S");
-        assert_eq!(compass(home, Coords { lat: 36.0, lon: -85.0 }), "E");
-        assert_eq!(compass(home, Coords { lat: 36.0, lon: -89.0 }), "W");
-        assert_eq!(compass(home, Coords { lat: 34.0, lon: -89.0 }), "SW");
-        assert_eq!(compass(home, Coords { lat: 38.0, lon: -85.0 }), "NE");
+        assert_eq!(compass_bearing(home, Coords { lat: 38.0, lon: -87.0 }), "N");
+        assert_eq!(compass_bearing(home, Coords { lat: 34.0, lon: -87.0 }), "S");
+        assert_eq!(compass_bearing(home, Coords { lat: 36.0, lon: -85.0 }), "E");
+        assert_eq!(compass_bearing(home, Coords { lat: 36.0, lon: -89.0 }), "W");
+        assert_eq!(compass_bearing(home, Coords { lat: 34.5, lon: -88.9 }), "SW");
     }
 
     /// A blank frame must report where the weather actually is, so an empty
@@ -1158,6 +1311,139 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    fn app_with_cells(n: usize) -> App {
+        let mut app = app_showing(45.0, 0.98);
+        app.cells = (0..n)
+            .map(|i| crate::radar::cells::StormCell {
+                centroid: Coords { lat: 36.0 + i as f64 * 0.3, lon: -87.0 },
+                max_dbz: 50.0,
+                rotation_ms: None,
+                min_cc: None,
+                max_vil: None,
+                max_echo_top_km: None,
+                distance_km: 30.0,
+                bearing: "N",
+                threat: crate::radar::cells::CellThreat::Strong,
+            })
+            .collect();
+        app
+    }
+
+    /// Cell markers describe the newest observed volume only; drawn on a
+    /// forecast frame they would bracket echo they do not belong to.
+    #[test]
+    fn cell_markers_stay_off_forecast_frames() {
+        let mut app = app_with_cells(1);
+        app.cells[0].centroid = app.home;
+        let on_observed = app.build_overlay(20, 20).painted();
+
+        app.ring.push(RadarFrame {
+            captured_at: chrono::Utc::now() + chrono::Duration::minutes(30),
+            field: std::sync::Arc::new(StormField { refl: 45.0, moment: 0.98 }),
+            projected: true,
+        });
+        app.ring.jump_newest();
+        let on_forecast = app.build_overlay(20, 20).painted();
+        assert!(
+            on_forecast < on_observed,
+            "markers must vanish on the forecast frame: {on_forecast} vs {on_observed}"
+        );
+    }
+
+    #[test]
+    fn frame_conditions_pick_forecast_for_future_and_observation_for_past() {
+        let mut app = app_showing(45.0, 0.98);
+        let now_frame = app.ring.current().unwrap().captured_at;
+
+        app.hourly = vec![crate::conditions::HourlyForecast {
+            valid: now_frame + chrono::Duration::minutes(60),
+            temp_f: Some(78.0),
+            dewpoint_f: None,
+            humidity_pct: None,
+            wind_mph: None,
+            wind_dir: None,
+            short: Some("Sunny".into()),
+        }];
+        let mut past_obs = crate::conditions::Conditions {
+            station: "KM02".into(),
+            observed_at: Some(now_frame - chrono::Duration::minutes(50)),
+            description: None,
+            temp_f: Some(66.0),
+            dewpoint_f: None,
+            humidity_pct: None,
+            wind_mph: None,
+            wind_dir: None,
+            visibility_mi: None,
+            rain_last_hour_in: None,
+        };
+        app.obs_history = vec![past_obs.clone()];
+
+        assert!(
+            app.frame_conditions().is_none(),
+            "the newest observed frame IS now; the current block covers it"
+        );
+
+        app.ring.push(RadarFrame {
+            captured_at: now_frame + chrono::Duration::minutes(45),
+            field: std::sync::Arc::new(StormField { refl: 45.0, moment: 0.98 }),
+            projected: true,
+        });
+        app.ring.jump_newest();
+        match app.frame_conditions() {
+            Some((_, crate::conditions::FrameConditions::Forecast(h))) => {
+                assert_eq!(h.temp_f, Some(78.0));
+            }
+            other => panic!("expected the hourly forecast, got {:?}", other.is_some()),
+        }
+
+        past_obs.observed_at = Some(now_frame - chrono::Duration::minutes(50));
+        app.ring.push(RadarFrame {
+            captured_at: now_frame - chrono::Duration::minutes(45),
+            field: std::sync::Arc::new(StormField { refl: 45.0, moment: 0.98 }),
+            projected: false,
+        });
+        app.ring.jump_oldest();
+        match app.frame_conditions() {
+            Some((_, crate::conditions::FrameConditions::Observed(c))) => {
+                assert_eq!(c.temp_f, Some(66.0));
+            }
+            other => panic!("expected the past observation, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn cell_keys_resolve() {
+        assert_eq!(press(&[key('n')]), Action::CellNext);
+        assert_eq!(press(&[key('N')]), Action::CellPrev);
+    }
+
+    #[test]
+    fn cycling_wraps_and_pans_the_map_to_the_cell() {
+        let mut app = app_with_cells(2);
+        app.apply(Action::CellNext);
+        assert_eq!(app.selected_cell, Some(0));
+        assert!(
+            (app.viewport.centre.lat - app.cells[0].centroid.lat).abs() < 1e-9,
+            "selecting a cell must pan to it"
+        );
+        app.apply(Action::CellNext);
+        assert_eq!(app.selected_cell, Some(1));
+        app.apply(Action::CellNext);
+        assert_eq!(app.selected_cell, Some(0), "cycling wraps");
+        app.apply(Action::CellPrev);
+        assert_eq!(app.selected_cell, Some(1), "prev wraps backwards");
+    }
+
+    #[test]
+    fn cycling_with_no_cells_explains_itself_instead_of_panicking() {
+        let mut app = app_with_cells(0);
+        app.apply(Action::CellNext);
+        assert_eq!(app.selected_cell, None);
+        assert_eq!(app.status, "no storm cells detected");
+        app.apply(Action::CellPrev);
+        assert_eq!(app.selected_cell, None);
     }
 
     /// The whole point of the summary: an empty sky and a failed fetch look
