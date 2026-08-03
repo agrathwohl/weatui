@@ -107,6 +107,7 @@ cold_below_f = 32.0  # temperatures at/below render blue in the HUD
 hot_above_f = 95.0   # temperatures at/above render red
 map = true           # county borders + city names on the radar view
 labels = true        # hazard letters beside storm cells
+ring_km = [25.0, 50.0, 100.0]  # distance ring radii from home
 ```
 
 ## Run
@@ -128,7 +129,7 @@ HRRR predicts.*
 | `h` `j` `k` `l` | pan west / south / north / east |
 | `C-d` `C-u` | pan half a screen |
 | `zi` `zo` | zoom in / out |
-| `gh` | recentre on home |
+| `gh` | recenter on home |
 | `[` `]` | previous / next frame |
 | `gg` / `G` | oldest frame / newest (follow live) |
 | `space` | play / pause the loop |

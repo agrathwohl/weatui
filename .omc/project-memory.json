@@ -1,0 +1,235 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1785386894076,
+  "projectRoot": "/home/gwohl/code/weatui",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Rust",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "Cargo.toml"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": "cargo",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": "cd /home/gwohl/code/weatui\npython3 - <<'PYEOF'\ns=open('README.md').read()\nold=\"\"\"map = true           # county borders + city names on the radar view\nlabels = true        # hazard letters beside storm cells\n```\"\"\"\nnew=\"\"\"map = true           # county borders + city names on the radar view\nlabels = true        # hazard letters beside storm cells\nring_km = [25.0, 50.0, 100.0]  # distance ring radii from home\n```\"\"\"\nassert old in s\nopen('README.md','w').write(s.replace(old,new))\nprint(\"readme ok\")\nPYEOF\nnix develop --command bash -c 'cargo clippy --all-targets 2>&1 | grep -cE \"^(warning|error)\"' || true\nnix develop --command bash -c 'cargo build --release 2>&1 | grep -E \"^error|^warning:\"'; echo BUILT",
+    "testCommand": "cd /home/gwohl/code/weatui\npython3 - <<'PYEOF'\ns=open('src/render/labels.rs').read()\ns=s.replace(\"\"\"            surface_temp_f: Some(70.0),\n        }\n        .render(area, &mut buf);\n        let row: String =\"\"\",\"\"\"            surface_temp_f: Some(70.0),\n            home: Coords { lat: 0.0, lon: 0.0 },\n            ring_km: &[],\n        }\n        .render(area, &mut buf);\n        let row: String =\"\"\")\ns=s.replace(\"\"\"            surface_temp_f: None,\n        }\n        .render(area, &mut buf);\n        assert!(\"\"\",\"\"\"            surface_temp_f: None,\n            home: Coords { lat: 0.0, lon: 0.0 },\n            ring_km: &[],\n        }\n        .render(area, &mut buf);\n        assert!(\"\"\")\ns=s.replace(\"\"\"            surface_temp_f: None,\n        }\n        .render(area, &mut buf);\n        let text: String = (0..30)\"\"\",\"\"\"            surface_temp_f: None,\n            home: Coords { lat: 0.0, lon: 0.0 },\n            ring_km: &[],\n        }\n        .render(area, &mut buf);\n        let text: String = (0..30)\"\"\")\n\nanchor = \"    #[test]\\n    fn rain_labels_as_snow_below_freezing_surface_temps()\"\ntest = '''    #[test]\n    fn ring_distance_labels_sit_on_their_rings() {\n        let home = Coords { lat: 36.0, lon: -87.0 };\n        let viewport = Viewport::new(home, 120.0, 60, 60);\n        let area = Rect::new(0, 0, 60, 30);\n        let mut buf = Buffer::empty(area);\n        MapText {\n            viewport: &viewport,\n            cells: &[],\n            show_cities: false,\n            show_hazards: false,\n            surface_temp_f: None,\n            home,\n            ring_km: &[25.0, 50.0],\n        }\n        .render(area, &mut buf);\n        let text: String = (0..30)\n            .map(|y| {\n                (0..60).map(|x| buf.cell((x, y)).unwrap().symbol().to_string()).collect::<String>()\n            })\n            .collect::<Vec<_>>()\n            .join(\"\\\\n\");\n        assert!(text.contains(\"25km\"), \"{text}\");\n        assert!(text.contains(\"50km\"), \"{text}\");\n    }\n\n''' + anchor\ns = s.replace(anchor, test)\nopen('src/render/labels.rs','w').write(s)\nprint(\"fixtures + test\")\nPYEOF\npython3 - <<'PYEOF'\ns=open('src/config.rs').read()\nanchor = \"    #[test]\\n    fn map_and_label_layers_default_on_and_parse_off()\"\ntest = '''    #[test]\n    fn ring_radii_default_and_parse() {\n        let cfg = Config::parse(\"[location]\\\\nzip = \\\\\"73019\\\\\"\\\\n\", \"/tmp/c.toml\").unwrap();\n        assert_eq!(cfg.render.ring_km, vec![25.0, 50.0, 100.0]);\n        let custom = Config::parse(\n            \"[location]\\\\nzip = \\\\\"73019\\\\\"\\\\n\\\\n[render]\\\\nring_km = [10.0, 30.0]\\\\n\",\n            \"/tmp/c.toml\",\n        )\n        .unwrap();\n        assert_eq!(custom.render.ring_km, vec![10.0, 30.0]);\n    }\n\n''' + anchor\ns = s.replace(anchor, test)\nopen('src/config.rs','w').write(s)\nPYEOF\nnix develop --command bash -c 'cargo test 2>&1 | grep -E \"^error(\\[|:)|^test result|panicked|left|right\" -A4 | head -15'",
+    "lintCommand": "cargo clippy",
+    "devCommand": "cargo run",
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "src"
+    ],
+    "gitBranches": null
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 6,
+      "lastAccessed": 1785386894065,
+      "keyFiles": [
+        "config.rs",
+        "daemon.rs",
+        "geo.rs",
+        "main.rs",
+        "notify.rs"
+      ]
+    },
+    "target": {
+      "path": "target",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1785386894069,
+      "keyFiles": [
+        "CACHEDIR.TAG"
+      ]
+    },
+    "src/data": {
+      "path": "src/data",
+      "purpose": "Data files",
+      "fileCount": 2,
+      "lastAccessed": 1785386894071,
+      "keyFiles": [
+        "wsr88d_sites.csv",
+        "zcta_centroids.csv"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "src/tui.rs",
+      "accessCount": 29,
+      "lastAccessed": 1785739013733,
+      "type": "file"
+    },
+    {
+      "path": "src/radar/fetch.rs",
+      "accessCount": 13,
+      "lastAccessed": 1785645006222,
+      "type": "file"
+    },
+    {
+      "path": "assets/main.png",
+      "accessCount": 8,
+      "lastAccessed": 1785740218494,
+      "type": "file"
+    },
+    {
+      "path": "src/radar/mod.rs",
+      "accessCount": 7,
+      "lastAccessed": 1785645114761,
+      "type": "file"
+    },
+    {
+      "path": "src/radar/hrrr.rs",
+      "accessCount": 4,
+      "lastAccessed": 1785397332400,
+      "type": "file"
+    },
+    {
+      "path": "src/conditions.rs",
+      "accessCount": 4,
+      "lastAccessed": 1785572013568,
+      "type": "file"
+    },
+    {
+      "path": "src/render/hud.rs",
+      "accessCount": 4,
+      "lastAccessed": 1785645115300,
+      "type": "file"
+    },
+    {
+      "path": "src/radar/cells.rs",
+      "accessCount": 4,
+      "lastAccessed": 1785646112621,
+      "type": "file"
+    },
+    {
+      "path": "README.md",
+      "accessCount": 3,
+      "lastAccessed": 1785623724063,
+      "type": "file"
+    },
+    {
+      "path": "assets/help.png",
+      "accessCount": 3,
+      "lastAccessed": 1785740232244,
+      "type": "file"
+    },
+    {
+      "path": "src/radar/ring.rs",
+      "accessCount": 2,
+      "lastAccessed": 1785397606446,
+      "type": "file"
+    },
+    {
+      "path": "src/render/mod.rs",
+      "accessCount": 2,
+      "lastAccessed": 1785572018986,
+      "type": "file"
+    },
+    {
+      "path": "src/notify.rs",
+      "accessCount": 2,
+      "lastAccessed": 1785646112988,
+      "type": "file"
+    },
+    {
+      "path": "src/config.rs",
+      "accessCount": 2,
+      "lastAccessed": 1785646126712,
+      "type": "file"
+    },
+    {
+      "path": "src/daemon.rs",
+      "accessCount": 2,
+      "lastAccessed": 1785646127063,
+      "type": "file"
+    },
+    {
+      "path": "assets/forecast.png",
+      "accessCount": 2,
+      "lastAccessed": 1785740232633,
+      "type": "file"
+    },
+    {
+      "path": "src/radar/grid.rs",
+      "accessCount": 1,
+      "lastAccessed": 1785397332646,
+      "type": "file"
+    },
+    {
+      "path": "src/render/raster.rs",
+      "accessCount": 1,
+      "lastAccessed": 1785397337373,
+      "type": "file"
+    },
+    {
+      "path": "src/render/colormap.rs",
+      "accessCount": 1,
+      "lastAccessed": 1785397337696,
+      "type": "file"
+    },
+    {
+      "path": "src/render/timeline.rs",
+      "accessCount": 1,
+      "lastAccessed": 1785397489673,
+      "type": "file"
+    },
+    {
+      "path": "Cargo.toml",
+      "accessCount": 1,
+      "lastAccessed": 1785623428571,
+      "type": "file"
+    },
+    {
+      "path": "flake.nix",
+      "accessCount": 1,
+      "lastAccessed": 1785623469379,
+      "type": "file"
+    },
+    {
+      "path": "src/render/overlay.rs",
+      "accessCount": 1,
+      "lastAccessed": 1785645005762,
+      "type": "file"
+    },
+    {
+      "path": "src/counties.rs",
+      "accessCount": 1,
+      "lastAccessed": 1785734555373,
+      "type": "file"
+    },
+    {
+      "path": "src/render/labels.rs",
+      "accessCount": 1,
+      "lastAccessed": 1785734654908,
+      "type": "file"
+    },
+    {
+      "path": "src/radar/interp.rs",
+      "accessCount": 1,
+      "lastAccessed": 1785738608348,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

@@ -11,8 +11,7 @@ use crate::radar::{DbzGrid, RadarField, RadarProduct, fetch};
 use crate::render::colormap::product_rgb;
 use crate::render::hud::Hud;
 use crate::render::overlay::{
-    COUNTY_BORDER, HOME_MARKER, LETHAL_OUTLINE, PixelOverlay, DISTANCE_RING, SEVERE_OUTLINE,
-    WATCH_OUTLINE,
+    COUNTY_BORDER, HOME_MARKER, LETHAL_OUTLINE, PixelOverlay, SEVERE_OUTLINE, WATCH_OUTLINE,
 };
 use crate::render::raster::RadarRaster;
 use crate::render::timeline::Timeline;
@@ -32,7 +31,6 @@ const MIN_SPAN_KM: f64 = 20.0;
 const MAX_SPAN_KM: f64 = 900.0;
 const DEFAULT_SPAN_KM: f64 = 260.0;
 const HUD_WIDTH: u16 = 34;
-const DISTANCE_RING_KM: &[f64] = &[25.0, 50.0, 100.0];
 /// Fetched forecast steps plus the motion-interpolated fill frames between
 /// them: 18 hourly steps synthesize 3 extras per gap.
 const MAX_FORECAST_FRAMES: usize = 72;
@@ -61,7 +59,7 @@ const HELP: &str = "\
    h j k l    pan west/south/north/east
    C-d C-u    pan half a screen
    zi zo      zoom in / out
-   gh         recentre on home
+   gh         recenter on home
 
  TIMELINE
    [ ]        previous / next frame
@@ -146,7 +144,7 @@ pub enum Action {
     PanHalfUp,
     ZoomIn,
     ZoomOut,
-    RecentreHome,
+    RecenterHome,
     FrameBack,
     FrameForward,
     JumpOldest,
@@ -165,7 +163,7 @@ pub fn resolve_key(pending: &mut Option<char>, key: KeyEvent) -> Action {
     if let Some(prefix) = pending.take() {
         return match (prefix, key.code) {
             ('g', KeyCode::Char('g')) => Action::JumpOldest,
-            ('g', KeyCode::Char('h')) => Action::RecentreHome,
+            ('g', KeyCode::Char('h')) => Action::RecenterHome,
             ('z', KeyCode::Char('i')) => Action::ZoomIn,
             ('z', KeyCode::Char('o')) => Action::ZoomOut,
             ('Z', KeyCode::Char('Z')) => Action::Quit,
@@ -222,6 +220,7 @@ pub struct App {
     temp_limits: (f32, f32),
     show_map: bool,
     show_labels: bool,
+    ring_km: Vec<f64>,
     counties: Option<crate::counties::CountyMap>,
     tz: chrono_tz::Tz,
     pending: Option<char>,
@@ -264,6 +263,7 @@ impl App {
             temp_limits: (cfg.render.cold_below_f, cfg.render.hot_above_f),
             show_map: cfg.render.map,
             show_labels: cfg.render.labels,
+            ring_km: cfg.render.ring_km.clone(),
             counties: None,
             tz,
             pending: None,
@@ -302,7 +302,7 @@ impl App {
             Action::PanHalfDown => self.viewport = self.viewport.panned_km(0.0, -step * 4.0),
             Action::ZoomIn => self.viewport = self.viewport.zoomed(0.5, MIN_SPAN_KM, MAX_SPAN_KM),
             Action::ZoomOut => self.viewport = self.viewport.zoomed(2.0, MIN_SPAN_KM, MAX_SPAN_KM),
-            Action::RecentreHome => self.viewport.centre = self.home,
+            Action::RecenterHome => self.viewport.centre = self.home,
             Action::FrameBack => self.ring.step_back(),
             Action::FrameForward => self.ring.step_forward(),
             Action::JumpOldest => self.ring.jump_oldest(),
@@ -517,7 +517,7 @@ impl App {
                 overlay.draw_ring(ring, &self.viewport, COUNTY_BORDER);
             }
         }
-        overlay.draw_distance_rings(self.home, DISTANCE_RING_KM, &self.viewport, DISTANCE_RING);
+        overlay.draw_distance_rings(self.home, &self.ring_km, &self.viewport);
         self.paint_product_overlays(&mut overlay);
         let mut ordered: Vec<_> = self.active.iter().collect();
         ordered.sort_by_key(|a| a.tier);
@@ -593,6 +593,8 @@ impl App {
                 show_cities: self.show_map,
                 show_hazards: self.show_labels,
                 surface_temp_f: self.conditions.as_ref().and_then(|c| c.temp_f),
+                home: self.home,
+                ring_km: &self.ring_km,
             },
             map,
         );
@@ -1243,8 +1245,8 @@ mod tests {
     }
 
     #[test]
-    fn gh_recentres_on_home_without_colliding_with_the_pan_binding() {
-        assert_eq!(press(&[key('g'), key('h')]), Action::RecentreHome);
+    fn gh_recenters_on_home_without_colliding_with_the_pan_binding() {
+        assert_eq!(press(&[key('g'), key('h')]), Action::RecenterHome);
     }
 
     #[test]

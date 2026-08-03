@@ -13,7 +13,8 @@ pub const LETHAL_OUTLINE: Rgb = (255, 64, 64);
 pub const SEVERE_OUTLINE: Rgb = (255, 176, 32);
 pub const WATCH_OUTLINE: Rgb = (120, 200, 255);
 pub const HOME_MARKER: Rgb = (255, 255, 255);
-pub const DISTANCE_RING: Rgb = (60, 66, 78);
+/// Muted, mutually distinct: one per ring, cycling if more are configured.
+pub const RING_COLORS: [Rgb; 3] = [(58, 66, 88), (54, 76, 64), (82, 66, 56)];
 pub const COUNTY_BORDER: Rgb = (52, 56, 66);
 
 #[derive(Debug, Clone)]
@@ -124,14 +125,14 @@ impl PixelOverlay {
         centre: Coords,
         radii_km: &[f64],
         viewport: &Viewport,
-        rgb: Rgb,
     ) {
         let kpp = viewport.km_per_pixel();
         if kpp <= 0.0 {
             return;
         }
         let (cx, cy) = viewport.project_to_nearest_pixel(centre);
-        for radius_km in radii_km.iter().copied().filter(|r| *r > 0.0) {
+        for (i, radius_km) in radii_km.iter().copied().filter(|r| *r > 0.0).enumerate() {
+            let rgb = RING_COLORS[i % RING_COLORS.len()];
             let radius_px = radius_km / kpp;
             if radius_px < 2.0 || radius_px > self.width as f64 * 2.0 {
                 continue;

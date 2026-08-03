@@ -173,6 +173,9 @@ pub struct Render {
     /// Hazard letters beside storm cell markers.
     #[serde(default = "default_true")]
     pub labels: bool,
+    /// Distance ring radii from home, km.
+    #[serde(default = "default_rings")]
+    pub ring_km: Vec<f64>,
 }
 
 fn default_poll_interval() -> u64 {
@@ -220,6 +223,9 @@ fn default_hot_above() -> f32 {
 }
 fn default_true() -> bool {
     true
+}
+fn default_rings() -> Vec<f64> {
+    vec![25.0, 50.0, 100.0]
 }
 
 impl Default for Alerts {
@@ -273,6 +279,7 @@ impl Default for Render {
             hot_above_f: default_hot_above(),
             map: true,
             labels: true,
+            ring_km: default_rings(),
         }
     }
 }
@@ -347,6 +354,18 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ring_radii_default_and_parse() {
+        let cfg = Config::parse("[location]\nzip = \"73019\"\n", "/tmp/c.toml").unwrap();
+        assert_eq!(cfg.render.ring_km, vec![25.0, 50.0, 100.0]);
+        let custom = Config::parse(
+            "[location]\nzip = \"73019\"\n\n[render]\nring_km = [10.0, 30.0]\n",
+            "/tmp/c.toml",
+        )
+        .unwrap();
+        assert_eq!(custom.render.ring_km, vec![10.0, 30.0]);
+    }
 
     #[test]
     fn map_and_label_layers_default_on_and_parse_off() {

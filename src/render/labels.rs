@@ -38,6 +38,8 @@ pub struct MapText<'a> {
     pub show_cities: bool,
     pub show_hazards: bool,
     pub surface_temp_f: Option<f32>,
+    pub home: crate::geo::Coords,
+    pub ring_km: &'a [f64],
 }
 
 impl MapText<'_> {
@@ -53,6 +55,34 @@ impl MapText<'_> {
 
 impl Widget for MapText<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
+        let km_per_px_ring = self.viewport.km_per_pixel();
+        if km_per_px_ring > 0.0
+            && let Some((hx, hy)) = self.cell_of(self.home, area)
+        {
+            for (i, km) in self.ring_km.iter().filter(|r| **r > 0.0).enumerate() {
+                let r_cols = (km / km_per_px_ring).round() as i64;
+                let x = hx as i64 + r_cols;
+                if x <= hx as i64 || x as u16 >= area.right() {
+                    continue;
+                }
+                let (r, g, b) =
+                    crate::render::overlay::RING_COLORS[i % crate::render::overlay::RING_COLORS.len()];
+                // Ring colors are muted for the lines; the label needs a
+                // brighter shade of the same hue to be readable.
+                buf.set_stringn(
+                    x as u16,
+                    hy,
+                    format!("{km:.0}km"),
+                    (area.right() - x as u16) as usize,
+                    Style::default().fg(Color::Rgb(
+                        (r * 2).min(210),
+                        (g * 2).min(210),
+                        (b * 2).min(210),
+                    )),
+                );
+            }
+        }
+
         if self.show_cities {
             let km_per_px = self.viewport.span_km / self.viewport.width.max(1) as f64;
             let half_lat = self.viewport.height as f64 * km_per_px / 2.0 / 111.2;
@@ -124,6 +154,32 @@ mod tests {
     }
 
     #[test]
+    fn ring_distance_labels_sit_on_their_rings() {
+        let home = Coords { lat: 36.0, lon: -87.0 };
+        let viewport = Viewport::new(home, 120.0, 60, 60);
+        let area = Rect::new(0, 0, 60, 30);
+        let mut buf = Buffer::empty(area);
+        MapText {
+            viewport: &viewport,
+            cells: &[],
+            show_cities: false,
+            show_hazards: false,
+            surface_temp_f: None,
+            home,
+            ring_km: &[25.0, 50.0],
+        }
+        .render(area, &mut buf);
+        let text: String = (0..30)
+            .map(|y| {
+                (0..60).map(|x| buf.cell((x, y)).unwrap().symbol().to_string()).collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("25km"), "{text}");
+        assert!(text.contains("50km"), "{text}");
+    }
+
+    #[test]
     fn rain_labels_as_snow_below_freezing_surface_temps() {
         assert_eq!(hazard_letter(Hazard::Rain, Some(70.0)), 'R');
         assert_eq!(hazard_letter(Hazard::Rain, Some(30.0)), 'S');
@@ -144,6 +200,8 @@ mod tests {
             show_cities: false,
             show_hazards: true,
             surface_temp_f: Some(70.0),
+            home: Coords { lat: 0.0, lon: 0.0 },
+            ring_km: &[],
         }
         .render(area, &mut buf);
         let row: String =
@@ -164,6 +222,8 @@ mod tests {
             show_cities: false,
             show_hazards: false,
             surface_temp_f: None,
+            home: Coords { lat: 0.0, lon: 0.0 },
+            ring_km: &[],
         }
         .render(area, &mut buf);
         assert!(
@@ -184,6 +244,8 @@ mod tests {
             show_cities: true,
             show_hazards: false,
             surface_temp_f: None,
+            home: Coords { lat: 0.0, lon: 0.0 },
+            ring_km: &[],
         }
         .render(area, &mut buf);
         let text: String = (0..30)
