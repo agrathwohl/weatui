@@ -8,22 +8,17 @@ truecolor TUI with vim keys.
 ![weatui main view](assets/main.png)
 
 *Live composite reflectivity from KPAH with distance rings, the home
-crosshair, and current surface conditions in the HUD. The layer line at the
-bottom shows the default stack: reflectivity base with velocity and
-debris-detection augmentations standing by.*
+crosshair, and current surface conditions in the HUD.*
 
 ## What it does
 
-- **Live radar** — NEXRAD Level II volumes fetched straight from the NOAA
-  realtime feed, rendered at full resolution as half-block pixels (two
-  independently coloured pixels per terminal cell). Composite reflectivity
-  with a dual-polarization correlation mask that scrubs insects, birds and
-  ground clutter without touching real precipitation.
-- **The future, from the model that knows** — forecast frames come from NOAA
-  HRRR's simulated composite reflectivity (`REFC`). HRRR assimilates live radar every 15 minutes
-  and can grow, decay and initiate storms — it is a real forecast, not a
-  smear of the current picture. Scrub seamlessly from an hour or more of
-  observed history to eighteen hours ahead on one timeline.
+- **Live radar** — NEXRAD Level II volumes from the NOAA realtime feed,
+  rendered at full resolution as half-block pixels (two independently
+  coloured pixels per terminal cell), with dual-polarization clutter
+  filtering.
+- **Forecast radar** — HRRR simulated composite reflectivity (`REFC`).
+  Scrub from an hour or more of observed history to eighteen hours ahead
+  on one timeline.
 - **Severe weather alerts** — polls api.weather.gov every few seconds,
   classifies by P-VTEC into lethal / severe / watch tiers, draws warning
   polygons on the map, estimates time-of-arrival from the storm motion
@@ -31,14 +26,13 @@ debris-detection augmentations standing by.*
 - **Current conditions** — temperature, dew point, humidity, wind,
   visibility and precipitation from the nearest NWS observation station,
   refreshed every five minutes.
-- **A feed watchdog** — if alert polling fails long enough, weatui tells you
-  loudly. Silence is never allowed to look like safety.
+- **A feed watchdog** — a critical notification fires if alert polling
+  stays down.
 
 ![forecast frame](assets/forecast.png)
 
 *A forecast frame (`FCST` in the timeline): HRRR's prediction for 90 minutes
-from now, rendered through the same colormap as the observed frames so the
-timeline never changes meaning as it crosses "now".*
+from now.*
 
 ## Install
 
@@ -147,21 +141,14 @@ predicts is the yellow patch at the top.*
 
 ### Layers
 
-**Base layers** (`1`–`3`) exist on both the observed and forecast halves of
-the timeline, so scrubbing past "now" never blanks the map: reflectivity,
-echo top, and vertically integrated liquid each have a NEXRAD-derived
-observed form and an HRRR-forecast form of the same quantity.
+**Base layers** (`1`–`3`) — reflectivity, echo top, and vertically
+integrated liquid, each with an observed (NEXRAD) and forecast (HRRR) form.
 
-**Augmentations** (`4`–`7`) are the radar-only moments — the ones no model
-can forecast because they are properties of the radar pulse itself. They
-paint *over* the base wherever the reading is diagnostic: strong inbound or
-outbound velocity (rotation), a correlation-coefficient collapse inside
-strong echo (lofted debris — the radar-confirmed-tornado signature),
-anomalous differential reflectivity (hail), broad spectrum width
-(turbulence). Velocity and debris detection are **on by default**; they only
-draw inside ≥ 30 dBZ echo, so a clear night's insect layer cannot paint
-false rotation. On forecast frames they simply have nothing to add and the
-base keeps rendering.
+**Augmentations** (`4`–`7`) — velocity (rotation), correlation coefficient
+(lofted debris), differential reflectivity (hail), and spectrum width
+(turbulence), painted over the base wherever the reading is diagnostic.
+Velocity and debris detection are on by default. Augmentations draw only
+inside ≥ 30 dBZ echo and only on observed frames.
 
 ## Notifications
 
@@ -174,26 +161,21 @@ example mako's `[urgency=critical]` section):
   summary `[LETHAL] Tornado Warning`, body with the NWS headline, the area,
   and an estimated arrival time computed from the alert's storm-motion
   vector against your location.
-- Notification text is plain ASCII on purpose: your notification daemon's
-  font may not carry Nerd Font glyphs, and tofu in a tornado warning is
-  unacceptable.
+- Notification text is plain ASCII, so it renders in any daemon's font.
 - Each tier can also run a **custom script** (`[alerts.scripts]`): the
   executable is spawned with the tier and event as arguments and the full
   alert in its environment — `WEATUI_TIER`, `WEATUI_EVENT`,
   `WEATUI_HEADLINE`, `WEATUI_AREA`, `WEATUI_ETA_MINUTES`. Scripts run in
   addition to the desktop notification, or instead of it when the tier's
-  notify level is `"none"`. Script and notification fail independently —
-  a broken script never silences a warning.
+  notify level is `"none"`. Script and notification failures are
+  independent.
 - If no poll of api.weather.gov has succeeded for `stale_after_secs`, a
-  critical **ALERT FEED STALE** notification tells you that you are *not*
-  currently protected — a dead poller must never be indistinguishable from
-  calm weather.
+  critical **ALERT FEED STALE** notification fires.
 
-By design, only life-safety products are alerted: tornado, extreme wind,
-flash flood, severe thunderstorm, squall and dust storm warnings, tornado
-and severe thunderstorm watches, and Special Weather Statements (which
-carry storm motion, gust and hail data despite having no VTEC). Air
-quality, heat, marine and surf products are deliberately out of scope.
+Only life-safety products are alerted: tornado, extreme wind, flash flood,
+severe thunderstorm, squall and dust storm warnings, tornado and severe
+thunderstorm watches, and Special Weather Statements. Air quality, heat,
+marine and surf products are out of scope.
 
 ## Data sources
 
