@@ -26,8 +26,6 @@ crosshair, and current surface conditions in the HUD.*
 - **Current conditions**: temperature, dew point, humidity, wind,
   visibility and precipitation from the nearest NWS observation station,
   refreshed every five minutes.
-- **A feed watchdog**: a critical notification fires if alert polling
-  stays down.
 
 ![forecast frame](assets/forecast.png)
 
