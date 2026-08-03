@@ -681,7 +681,9 @@ impl App {
         );
 
         if self.show_help {
-            let area = centred(58, 18, root);
+            let h = HELP.lines().count() as u16 + 2;
+            let w = HELP.lines().map(|l| l.chars().count()).max().unwrap_or(0) as u16 + 3;
+            let area = centred(w, h, root);
             frame.render_widget(Clear, area);
             frame.render_widget(
                 Paragraph::new(HELP)
@@ -1540,6 +1542,21 @@ mod tests {
         assert_eq!(app.dwell_factor(), 3.0, "a 15-minute forecast step dwells 3x");
         app.ring.step_forward();
         assert_eq!(app.dwell_factor(), 6.0, "even a 2-hour gap caps at 6x");
+    }
+
+    /// The popup must be tall enough for every line of the help text, or
+    /// bindings silently vanish off the bottom.
+    #[test]
+    fn the_help_popup_fits_the_whole_help_text() {
+        let lines = HELP.lines().count() as u16;
+        let widest = HELP.lines().map(|l| l.chars().count()).max().unwrap() as u16;
+        let root = ratatui::layout::Rect::new(0, 0, 200, 50);
+        let area = centred(widest + 3, lines + 2, root);
+        assert!(area.height >= lines + 2, "help clipped: {} rows for {lines} lines", area.height);
+        assert!(area.width >= widest + 2, "help clipped horizontally");
+        for key in ["f ", " m ", " t ", "n N", "q Esc ZZ C-c", "zi zo", "gg"] {
+            assert!(HELP.contains(key), "{key:?} missing from HELP");
+        }
     }
 
     #[test]
