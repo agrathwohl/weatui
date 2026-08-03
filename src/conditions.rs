@@ -133,6 +133,7 @@ fn conditions_from(station: String, obs: ObsProperties) -> Conditions {
 pub struct PointsUrls {
     pub observation_stations: String,
     pub forecast_hourly: String,
+    pub county_zone: String,
 }
 
 pub async fn points_urls(client: &reqwest::Client, home: Coords) -> Result<PointsUrls> {
@@ -146,6 +147,7 @@ pub async fn points_urls(client: &reqwest::Client, home: Coords) -> Result<Point
         observation_stations: String,
         #[serde(rename = "forecastHourly")]
         forecast_hourly: String,
+        county: String,
     }
 
     let url = format!("https://api.weather.gov/points/{:.4},{:.4}", home.lat, home.lon);
@@ -158,7 +160,11 @@ pub async fn points_urls(client: &reqwest::Client, home: Coords) -> Result<Point
         .json()
         .await
         .context("points response was not the expected JSON")?;
-    for u in [&points.properties.observation_stations, &points.properties.forecast_hourly] {
+    for u in [
+        &points.properties.observation_stations,
+        &points.properties.forecast_hourly,
+        &points.properties.county,
+    ] {
         if !u.starts_with("https://api.weather.gov/") {
             bail!("refusing to follow an off-host URL from the points response: {u}");
         }
@@ -166,6 +172,7 @@ pub async fn points_urls(client: &reqwest::Client, home: Coords) -> Result<Point
     Ok(PointsUrls {
         observation_stations: points.properties.observation_stations,
         forecast_hourly: points.properties.forecast_hourly,
+        county_zone: points.properties.county,
     })
 }
 

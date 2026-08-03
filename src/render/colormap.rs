@@ -1,9 +1,7 @@
 //! Reflectivity to RGB.
 //!
-//! The `Threat` ramp is not the NWS palette. It is deliberately near-monochrome
-//! below 35 dBZ and violently saturated above 50, because 50+ dBZ is where
-//! large hail and damaging wind live. A palette that renders nuisance rain as
-//! vividly as a supercell core wastes the only channel this display has.
+//! The `Threat` ramp is not the NWS palette. It is near-monochrome below
+//! 35 dBZ and saturated above 50, where large hail and damaging wind live.
 
 use crate::config::Colormap;
 use crate::radar::RadarProduct;
@@ -110,7 +108,7 @@ const ECHO_TOP_STOPS: &[(f32, Rgb)] = &[
 ];
 
 /// Liquid water in the column, kg/m^2. High values with a cold profile are the
-/// classic large-hail signature, so the top of the ramp is deliberately loud.
+/// classic large-hail signature, so the top of the ramp is loud.
 const VIL_STOPS: &[(f32, Rgb)] = &[
     (1.0, (55, 80, 140)),
     (10.0, (60, 160, 190)),
@@ -131,7 +129,7 @@ const VELOCITY_STOPS: &[(f32, Rgb)] = &[
     (40.0, (255, 120, 110)),
 ];
 
-/// Inverted deliberately: low correlation is the interesting value. A collapse
+/// Inverted: low correlation is the interesting value. A collapse
 /// below about 0.8 under a strong echo is a tornado debris signature, so the
 /// alarming colour belongs at the bottom of this scale rather than the top.
 const CORRELATION_STOPS: &[(f32, Rgb)] = &[
@@ -262,7 +260,7 @@ mod tests {
         out
     }
 
-    /// A hue ramp is deliberately not luminance-monotonic: yellow near 40 dBZ
+    /// A hue ramp is not luminance-monotonic: yellow near 40 dBZ
     /// is the luminance peak of saturated colour, and red above it is darker.
     /// What must hold is that no two adjacent levels collapse together.
     #[test]
@@ -289,7 +287,7 @@ mod tests {
     }
 
     /// Nws reproduces the published NWS scale, whose whole value is matching
-    /// what people already recognise, so it is deliberately exempt from the
+    /// what people already recognise, so it is exempt from the
     /// visibility floor the other two obey.
     #[test]
     fn the_nws_map_is_left_authentic_rather_than_brightened() {
@@ -325,7 +323,7 @@ mod tests {
         }
     }
 
-    /// Mono exists precisely for the grayscale and colour-blind case the hue
+    /// Mono exists for the grayscale and colour-blind case the hue
     /// ramp cannot serve, so it must be strictly luminance-monotonic.
     #[test]
     fn mono_ramp_brightens_monotonically_with_reflectivity() {
@@ -394,8 +392,8 @@ mod tests {
         }
     }
 
-    /// Inbound must be green and outbound red. Inverting this reads a storm
-    /// approaching as one departing, which is the whole point of the product.
+    /// Inbound is green, outbound red; inverted, an approaching storm reads
+    /// as departing.
     #[test]
     fn velocity_is_green_inbound_and_red_outbound() {
         let inbound = product_rgb(-30.0, RadarProduct::Velocity, Colormap::Threat).unwrap();

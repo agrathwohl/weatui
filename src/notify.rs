@@ -1,10 +1,9 @@
 //! Desktop notification via `notify-send`.
 //!
-//! Deliberately a shell-out rather than a D-Bus client crate: mako is already
+//! A shell-out rather than a D-Bus client crate: mako is already
 //! running and already styles `[urgency=critical]`, so `notify-send -u` maps
 //! straight onto configuration the user has written. Notification bodies stay
-//! plain ASCII because the notification daemon's font is not guaranteed to
-//! carry Nerd Font glyphs, and tofu in a tornado warning is unacceptable.
+//! plain ASCII because the daemon's font may lack Nerd Font glyphs.
 
 use crate::alert::filter::ThreatTier;
 use crate::alert::state::Notification;
@@ -107,9 +106,8 @@ fn run_script(script: &str, n: &Notification, eta_minutes: Option<i64>) -> Resul
     Ok(())
 }
 
-/// A fresh alert fans out to the desktop daemon (unless the tier's level is
-/// `"none"`) and to the tier's configured script, independently: a broken
-/// script must not silence the notification, nor the reverse.
+/// Fans out to the desktop daemon (unless the tier's level is `"none"`) and
+/// to the tier's script. The two fail independently.
 pub fn dispatch(
     n: &Notification,
     levels: &NotifyLevels,
@@ -302,8 +300,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A broken script must never silence the warning, and its failure must
-    /// not be swallowed either.
+    /// A broken script leaves the notification intact and fails loudly.
     #[test]
     fn a_missing_script_fails_loudly_without_touching_the_notification() {
         let silent = NotifyLevels {

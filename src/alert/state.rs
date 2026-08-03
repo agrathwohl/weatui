@@ -105,8 +105,7 @@ impl AlertState {
         self.last_success_epoch
     }
 
-    /// A poller that has silently died looks exactly like calm weather. Callers
-    /// must surface this rather than letting silence imply safety.
+    /// A dead poller looks like calm weather; callers surface the difference.
     pub fn is_stale(&self, now_epoch: u64, threshold_secs: u64) -> bool {
         match self.last_success_epoch {
             None => true,

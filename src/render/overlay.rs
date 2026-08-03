@@ -1,8 +1,8 @@
 //! Vector layer composited over the reflectivity raster.
 //!
 //! Warning polygons and the home marker are drawn into a sparse pixel overlay
-//! rather than into the dBZ grid, so annotations never masquerade as radar
-//! returns and the underlying data stays queryable.
+//! rather than into the dBZ grid, so annotations never read as radar returns
+//! and the underlying data stays queryable.
 
 use crate::alert::Ring;
 use crate::geo::Coords;
@@ -14,6 +14,7 @@ pub const SEVERE_OUTLINE: Rgb = (255, 176, 32);
 pub const WATCH_OUTLINE: Rgb = (120, 200, 255);
 pub const HOME_MARKER: Rgb = (255, 255, 255);
 pub const DISTANCE_RING: Rgb = (60, 66, 78);
+pub const COUNTY_BORDER: Rgb = (52, 56, 66);
 
 #[derive(Debug, Clone)]
 pub struct PixelOverlay {

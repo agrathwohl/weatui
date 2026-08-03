@@ -63,8 +63,8 @@ pub struct Alerts {
     pub tiers: Tiers,
     #[serde(default)]
     pub notify: NotifyLevels,
-    /// Emit a critical notification when no poll has succeeded for this long.
-    /// Silence must never be indistinguishable from safety.
+    /// Emit a critical notification when no poll has succeeded for this
+    /// long, so a dead feed cannot pass for calm weather.
     #[serde(default = "default_stale_after")]
     pub stale_after_secs: u64,
     #[serde(default)]
@@ -72,7 +72,7 @@ pub struct Alerts {
 }
 
 /// Absolute path of an executable to run when an alert of that tier fires,
-/// in addition to the desktop notification — or instead of it, when the
+/// in addition to the desktop notification, or instead of it when the
 /// tier's `[alerts.notify]` level is set to `"none"`.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Scripts {
@@ -109,8 +109,8 @@ pub struct Tiers {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Urgency {
-    /// No desktop notification for this tier — for running a script INSTEAD
-    /// OF the notification daemon rather than in addition to it.
+    /// No desktop notification for this tier, for running a script instead
+    /// of the notification daemon.
     None,
     Low,
     Normal,
@@ -167,6 +167,12 @@ pub struct Render {
     /// Temperatures at or above this render red in the HUD.
     #[serde(default = "default_hot_above")]
     pub hot_above_f: f32,
+    /// County borders and city names on the map.
+    #[serde(default = "default_true")]
+    pub map: bool,
+    /// Hazard letters beside storm cell markers.
+    #[serde(default = "default_true")]
+    pub labels: bool,
 }
 
 fn default_poll_interval() -> u64 {
@@ -198,7 +204,7 @@ fn default_site() -> String {
     "auto".to_string()
 }
 fn default_frames() -> usize {
-    12
+    4
 }
 fn default_refresh() -> u64 {
     60
@@ -211,6 +217,9 @@ fn default_cold_below() -> f32 {
 }
 fn default_hot_above() -> f32 {
     95.0
+}
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Alerts {
@@ -262,6 +271,8 @@ impl Default for Render {
             colormap: default_colormap(),
             cold_below_f: default_cold_below(),
             hot_above_f: default_hot_above(),
+            map: true,
+            labels: true,
         }
     }
 }
@@ -338,6 +349,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn map_and_label_layers_default_on_and_parse_off() {
+        let on = Config::parse("[location]\nzip = \"73019\"\n", "/tmp/c.toml").unwrap();
+        assert!(on.render.map);
+        assert!(on.render.labels);
+        let off = Config::parse(
+            "[location]\nzip = \"73019\"\n\n[render]\nmap = false\nlabels = false\n",
+            "/tmp/c.toml",
+        )
+        .unwrap();
+        assert!(!off.render.map);
+        assert!(!off.render.labels);
+    }
+
+    #[test]
     fn alert_scripts_parse_per_tier_and_none_silences_the_daemon() {
         let cfg = Config::parse(
             "[location]\nzip = \"73019\"\n\n             [alerts.notify]\nwatch = \"none\"\n\n             [alerts.scripts]\nlethal = \"/usr/local/bin/siren.sh\"\nwatch = \"/opt/hooks/log.sh\"\n",
@@ -368,7 +393,7 @@ mod tests {
         let cfg = Config::parse("[location]\nzip = \"73019\"\n", "/tmp/config.toml").unwrap();
         assert_eq!(cfg.location.zip.as_deref(), Some("73019"));
         assert_eq!(cfg.alerts.poll_interval_secs, 5);
-        assert_eq!(cfg.radar.frames, 12);
+        assert_eq!(cfg.radar.frames, 4);
         assert_eq!(cfg.radar.refresh_secs, 60);
         assert_eq!(cfg.render.colormap, Colormap::Threat);
         assert!(cfg.alerts.tiers.lethal.iter().any(|c| c == "TO.W"));

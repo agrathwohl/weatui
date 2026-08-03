@@ -11,7 +11,8 @@ use crate::radar::{DbzGrid, RadarField, RadarProduct, fetch};
 use crate::render::colormap::product_rgb;
 use crate::render::hud::Hud;
 use crate::render::overlay::{
-    HOME_MARKER, LETHAL_OUTLINE, PixelOverlay, DISTANCE_RING, SEVERE_OUTLINE, WATCH_OUTLINE,
+    COUNTY_BORDER, HOME_MARKER, LETHAL_OUTLINE, PixelOverlay, DISTANCE_RING, SEVERE_OUTLINE,
+    WATCH_OUTLINE,
 };
 use crate::render::raster::RadarRaster;
 use crate::render::timeline::Timeline;
@@ -32,7 +33,9 @@ const MAX_SPAN_KM: f64 = 900.0;
 const DEFAULT_SPAN_KM: f64 = 260.0;
 const HUD_WIDTH: u16 = 34;
 const DISTANCE_RING_KM: &[f64] = &[25.0, 50.0, 100.0];
-const MAX_FORECAST_FRAMES: usize = 18;
+/// Fetched forecast steps plus the motion-interpolated fill frames between
+/// them: 18 hourly steps synthesize 3 extras per gap.
+const MAX_FORECAST_FRAMES: usize = 72;
 
 /// Base layers exist on both halves of the timeline, so switching bases never
 /// blanks the forecast side. The observation-only moments are augmentations
@@ -73,12 +76,16 @@ const HELP: &str = "\
 
  CELLS
    n N        cycle storm cells (map follows)
+   t          toggle hazard letters (T H W L R S)
+
+ MAP LAYER
+   m          toggle county borders + city names
 
  FORECAST
    f          cycle horizon: 2h / 6h / 18h
 
    ?          toggle this help
-   q  ZZ      quit
+   q Esc ZZ C-c   quit
 ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,6 +132,8 @@ impl ForecastHorizon {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     CycleForecast,
+    ToggleMap,
+    ToggleLabels,
     CellNext,
     CellPrev,
     SelectProduct(usize),
@@ -185,6 +194,8 @@ pub fn resolve_key(pending: &mut Option<char>, key: KeyEvent) -> Action {
         KeyCode::Char('>') => Action::Faster,
         KeyCode::Char('<') => Action::Slower,
         KeyCode::Char('f') => Action::CycleForecast,
+        KeyCode::Char('m') => Action::ToggleMap,
+        KeyCode::Char('t') => Action::ToggleLabels,
         KeyCode::Char('n') => Action::CellNext,
         KeyCode::Char('N') => Action::CellPrev,
         KeyCode::Char(c @ '1'..='3') => Action::SelectProduct(c as usize - '1' as usize),
@@ -209,6 +220,9 @@ pub struct App {
     site: RadarSite,
     colormap: Colormap,
     temp_limits: (f32, f32),
+    show_map: bool,
+    show_labels: bool,
+    counties: Option<crate::counties::CountyMap>,
     tz: chrono_tz::Tz,
     pending: Option<char>,
     playback: Duration,
@@ -248,6 +262,9 @@ impl App {
             site,
             colormap: cfg.render.colormap,
             temp_limits: (cfg.render.cold_below_f, cfg.render.hot_above_f),
+            show_map: cfg.render.map,
+            show_labels: cfg.render.labels,
+            counties: None,
             tz,
             pending: None,
             playback: Duration::from_millis(450),
@@ -297,6 +314,8 @@ impl App {
             Action::Slower => {
                 self.playback = self.playback.mul_f64(1.4).min(Duration::from_millis(4000))
             }
+            Action::ToggleMap => self.show_map = !self.show_map,
+            Action::ToggleLabels => self.show_labels = !self.show_labels,
             Action::CellNext | Action::CellPrev if self.cells.is_empty() => {
                 self.status = "no storm cells detected".to_string();
             }
@@ -359,12 +378,9 @@ fn echo_summary(grid: &DbzGrid, product: RadarProduct, map: Colormap) -> String 
     }
 }
 
-/// Coarse sweep for the closest drawable echo outside the viewport.
-///
-/// Only runs on an otherwise blank frame, so the cost never lands on a frame
-/// that has something to draw. The step is deliberately far coarser than the
-/// display: this answers "is there weather anywhere near me", not "where
-/// exactly", and a fine sweep here would stall the redraw loop.
+/// Coarse sweep for the closest drawable echo outside the viewport. Runs
+/// only on blank frames, at a step far coarser than the display: it answers
+/// "is there weather near me", and a fine sweep would stall the redraw loop.
 fn nearest_echo_km(
     field: &dyn RadarField,
     home: Coords,
@@ -451,6 +467,20 @@ impl App {
     /// The current-conditions block always shows now; this picks what the
     /// displayed frame's own moment looked or will look like. The newest
     /// observed frame IS now, so it gets nothing extra.
+    /// Playback dwell scales with the simulated time this frame covers, so a
+    /// 15-minute forecast step lingers three times longer than a 5-minute
+    /// volume and the loop advances at a steady simulated rate.
+    fn dwell_factor(&self) -> f64 {
+        let frames: Vec<_> = self.ring.frames().collect();
+        let i = self.ring.cursor();
+        match (frames.get(i), frames.get(i + 1)) {
+            (Some(a), Some(b)) => {
+                ((b.captured_at - a.captured_at).num_minutes() as f64 / 5.0).clamp(1.0, 6.0)
+            }
+            _ => 1.0,
+        }
+    }
+
     fn frame_conditions(
         &self,
     ) -> Option<(chrono::DateTime<chrono::Utc>, crate::conditions::FrameConditions<'_>)> {
@@ -480,6 +510,13 @@ impl App {
 
     fn build_overlay(&self, width: usize, height: usize) -> PixelOverlay {
         let mut overlay = PixelOverlay::new(width, height);
+        if self.show_map
+            && let Some(map) = &self.counties
+        {
+            for ring in &map.rings {
+                overlay.draw_ring(ring, &self.viewport, COUNTY_BORDER);
+            }
+        }
         overlay.draw_distance_rings(self.home, DISTANCE_RING_KM, &self.viewport, DISTANCE_RING);
         self.paint_product_overlays(&mut overlay);
         let mut ordered: Vec<_> = self.active.iter().collect();
@@ -549,11 +586,20 @@ impl App {
             RadarRaster { grid: &grid, overlay: Some(&overlay), colormap: self.colormap, product: self.product },
             map,
         );
+        frame.render_widget(
+            crate::render::labels::MapText {
+                viewport: &self.viewport,
+                cells: &self.cells,
+                show_cities: self.show_map,
+                show_hazards: self.show_labels,
+                surface_temp_f: self.conditions.as_ref().and_then(|c| c.temp_f),
+            },
+            map,
+        );
 
         // An empty frame and a broken one are the same black rectangle, so an
         // empty one has to say so on the map rather than only in the status.
-        // Never paint the explainer over an active warning: a banner that
-        // hides a tornado polygon is worse than an unexplained black frame.
+        // The explainer never paints over an active warning polygon.
         if drawn_cells(&grid, self.product, self.colormap) == 0
             && self.active.is_empty()
             && let Some(f) = self.ring.current()
@@ -689,7 +735,7 @@ struct RadarUpdate {
 
 struct ForecastUpdate {
     valid_at: chrono::DateTime<chrono::Utc>,
-    field: Box<dyn RadarField>,
+    field: Arc<dyn RadarField>,
     lead_minutes: i64,
     /// Marks the start of a batch so the ring can retire the previous
     /// forecast before the replacement lands, rather than interleaving two.
@@ -703,6 +749,7 @@ enum Update {
     Radar(Result<RadarUpdate>),
     Forecast(Result<Box<ForecastUpdate>>),
     Conditions(Box<ConditionsUpdate>),
+    Counties(Result<crate::counties::CountyMap>),
 }
 
 /// Everything one conditions cycle learned. Fields the cycle failed to fetch
@@ -742,6 +789,7 @@ pub async fn run(cfg: Config, home: Coords) -> Result<()> {
         // observations endpoint fails is rotated out for the next-nearest one
         // instead of being retried forever with an empty panel.
         let mut urls: Option<crate::conditions::PointsUrls> = None;
+        let mut counties_sent = false;
         let mut stations: Vec<String> = Vec::new();
         let mut which = 0usize;
         loop {
@@ -763,6 +811,13 @@ pub async fn run(cfg: Config, home: Coords) -> Result<()> {
                 }
             }
             if let Some(u) = &urls {
+                if !counties_sent {
+                    let loaded = crate::counties::load(&client, &u.county_zone).await;
+                    counties_sent = loaded.is_ok();
+                    if conditions_tx.send(Update::Counties(loaded)).await.is_err() {
+                        return;
+                    }
+                }
                 if stations.is_empty() {
                     match crate::conditions::nearest_stations(&client, &u.observation_stations)
                         .await
@@ -913,19 +968,66 @@ pub async fn run(cfg: Config, home: Coords) -> Result<()> {
                     // step zero: if step zero errors, hanging the signal on it
                     // would leave the previous batch interleaved with this one.
                     let mut batch_started = false;
+                    let mut prev: Option<(chrono::DateTime<chrono::Utc>, Arc<dyn RadarField>)> =
+                        None;
                     for (index, step) in steps.into_iter().enumerate() {
-                        let update = crate::radar::hrrr::fetch_step(&client, cycle, step)
+                        let update = match crate::radar::hrrr::fetch_step(&client, cycle, step)
                             .await
-                            .map(|f| {
-                                Box::new(ForecastUpdate {
-                                    valid_at: f.valid_at,
-                                    lead_minutes: f.lead_minutes,
-                                    field: Box::new(f),
+                        {
+                            Ok(f) => {
+                                let valid_at = f.valid_at;
+                                let lead = f.lead_minutes;
+                                let field: Arc<dyn RadarField> = Arc::new(f);
+                                // Hourly steps get motion-interpolated fill
+                                // frames at the quarter hours, so playback
+                                // moves storms instead of teleporting them.
+                                if let Some((t0, before)) = prev.take()
+                                    && (valid_at - t0).num_minutes() > 15
+                                {
+                                    let shift = crate::radar::interp::estimate_shift(
+                                        before.as_ref(),
+                                        field.as_ref(),
+                                        home,
+                                    );
+                                    let gap = (valid_at - t0).num_minutes();
+                                    let mut m = 15;
+                                    while m < gap {
+                                        let synth = crate::radar::interp::InterpolatedField::new(
+                                            before.clone(),
+                                            field.clone(),
+                                            m as f32 / gap as f32,
+                                            shift,
+                                        );
+                                        let update = Box::new(ForecastUpdate {
+                                            valid_at: t0 + chrono::Duration::minutes(m),
+                                            lead_minutes: lead - gap + m,
+                                            field: Arc::new(synth),
+                                            first_of_batch: false,
+                                            index,
+                                            total,
+                                        });
+                                        if forecast_tx
+                                            .send(Update::Forecast(Ok(update)))
+                                            .await
+                                            .is_err()
+                                        {
+                                            return;
+                                        }
+                                        m += 15;
+                                    }
+                                }
+                                prev = Some((valid_at, field.clone()));
+                                Ok(Box::new(ForecastUpdate {
+                                    valid_at,
+                                    lead_minutes: lead,
+                                    field,
                                     first_of_batch: !std::mem::replace(&mut batch_started, true),
                                     index,
                                     total,
-                                })
-                            });
+                                }))
+                            }
+                            Err(e) => Err(e),
+                        };
                         if forecast_tx.send(Update::Forecast(update)).await.is_err() {
                             return;
                         }
@@ -1029,7 +1131,7 @@ async fn event_loop(
                     }
                     app.ring.push(RadarFrame {
                         captured_at: update.valid_at,
-                        field: Arc::from(update.field),
+                        field: update.field,
                         projected: true,
                     });
                     app.status = format!(
@@ -1042,6 +1144,10 @@ async fn event_loop(
                 }
                 Update::Forecast(Err(e)) => {
                     app.status = format!("forecast unavailable: {e:#}");
+                }
+                Update::Counties(Ok(map)) => app.counties = Some(map),
+                Update::Counties(Err(e)) => {
+                    app.status = format!("county borders unavailable: {e:#}");
                 }
                 Update::Conditions(u) => {
                     if u.current.is_some() {
@@ -1063,7 +1169,7 @@ async fn event_loop(
             }
         }
 
-        if last_advance.elapsed() >= app.playback {
+        if last_advance.elapsed() >= app.playback.mul_f64(app.dwell_factor()) {
             app.ring.advance_playback();
             last_advance = Instant::now();
         }
@@ -1222,8 +1328,8 @@ mod tests {
         assert_eq!(app.product, RadarProduct::Reflectivity, "out of range must not change it");
     }
 
-    /// Reports one fixed value for every product everywhere, so an overlay
-    /// test can choose exactly whether the reading is diagnostic or ordinary.
+    /// Reports one fixed value for every product, so a test controls whether
+    /// the reading is diagnostic.
     struct StormField {
         refl: f32,
         moment: f32,
@@ -1326,6 +1432,7 @@ mod tests {
                 distance_km: 30.0,
                 bearing: "N",
                 threat: crate::radar::cells::CellThreat::Strong,
+                hazards: vec![crate::radar::cells::Hazard::Rain],
             })
             .collect();
         app
@@ -1413,6 +1520,28 @@ mod tests {
         }
     }
 
+    /// A frame covering fifteen simulated minutes dwells three times longer
+    /// than a five-minute volume, so the loop advances at a steady rate.
+    #[test]
+    fn dwell_scales_with_the_frame_time_step() {
+        let mut app = app_showing(45.0, 0.98);
+        let t0 = app.ring.current().unwrap().captured_at;
+        assert_eq!(app.dwell_factor(), 1.0, "a lone frame has nothing to scale by");
+        for (minutes, projected) in [(5, false), (20, true), (140, true)] {
+            app.ring.push(RadarFrame {
+                captured_at: t0 + chrono::Duration::minutes(minutes),
+                field: std::sync::Arc::new(StormField { refl: 45.0, moment: 0.98 }),
+                projected,
+            });
+        }
+        app.ring.jump_oldest();
+        assert_eq!(app.dwell_factor(), 1.0, "5-minute observed cadence is the baseline");
+        app.ring.step_forward();
+        assert_eq!(app.dwell_factor(), 3.0, "a 15-minute forecast step dwells 3x");
+        app.ring.step_forward();
+        assert_eq!(app.dwell_factor(), 6.0, "even a 2-hour gap caps at 6x");
+    }
+
     #[test]
     fn cell_keys_resolve() {
         assert_eq!(press(&[key('n')]), Action::CellNext);
@@ -1446,7 +1575,7 @@ mod tests {
         assert_eq!(app.selected_cell, None);
     }
 
-    /// The whole point of the summary: an empty sky and a failed fetch look
+    /// An empty sky and a failed fetch look
     /// identical on screen, and only this line separates them.
     #[test]
     fn echo_summary_separates_an_empty_sky_from_a_missing_frame() {
@@ -1531,10 +1660,9 @@ mod tests {
         );
     }
 
-    /// The regression that would ruin every clear summer night: biologicals
-    /// collapse correlation and drift at jet speed, so without the echo gate
-    /// the default-on augmentations would flood an empty sky with false
-    /// rotation and debris pixels.
+    /// Biologicals collapse correlation and drift at jet speed; without the
+    /// echo gate the default-on augmentations would paint false rotation on
+    /// every clear night.
     #[test]
     fn augmentations_stay_dark_outside_real_echo() {
         let bugs = app_showing(10.0, 0.20);
@@ -1649,13 +1777,19 @@ mod tests {
         }
     }
 
-    /// The ring is sized for observations plus forecasts, so no horizon may
-    /// exceed the reserved headroom or it would evict observed volumes.
+    /// The ring is sized for observations plus forecasts including the
+    /// synthesized fill frames, so no horizon may exceed the reserved
+    /// headroom or it would evict observed volumes.
     #[test]
     fn no_horizon_exceeds_the_reserved_ring_headroom() {
         for age in CYCLE_AGES {
             for horizon in [ForecastHorizon::Near, ForecastHorizon::Mid, ForecastHorizon::Long] {
-                let n = horizon.steps(chrono::Duration::minutes(age)).len();
+                let steps = horizon.steps(chrono::Duration::minutes(age));
+                let synthesized: i64 = steps
+                    .windows(2)
+                    .map(|w| ((w[1].lead_minutes() - w[0].lead_minutes()) / 15 - 1).max(0))
+                    .sum();
+                let n = steps.len() + synthesized as usize;
                 assert!(
                     n <= MAX_FORECAST_FRAMES,
                     "{horizon:?} needs {n} frames at age {age} but {MAX_FORECAST_FRAMES} are reserved"

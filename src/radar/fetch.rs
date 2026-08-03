@@ -17,11 +17,10 @@ use nexrad::model::geo::{GeoPoint, RadarCoordinateSystem};
 
 const MAX_CHUNKS_PER_VOLUME: usize = 100;
 
-/// Below this, a return is not precipitation. Dual-pol correlation coefficient
-/// measures how alike the horizontal and vertical returns are: rain, snow and
-/// hail are near 1.0, while insects, birds, chaff and ground clutter scatter
-/// irregularly and collapse toward 0. Filtering on intensity instead would
-/// keep dense bug swarms and discard genuine drizzle.
+/// Below this, a return is not precipitation. Correlation coefficient
+/// measures how alike the horizontal and vertical returns are: rain, snow
+/// and hail sit near 1.0; insects, birds, chaff and ground clutter scatter
+/// irregularly and collapse toward 0.
 pub const DEFAULT_MIN_CORRELATION: f32 = 0.90;
 
 /// One elevation cut and every moment it carries.
@@ -50,7 +49,7 @@ impl Tilt {
 
 /// Composite reflectivity: the strongest echo anywhere in the column.
 ///
-/// Deliberately not base reflectivity from the lowest tilt. HRRR publishes
+/// Not base reflectivity from the lowest tilt. HRRR publishes
 /// REFC, the column maximum, so sampling a single cut would make the observed
 /// and forecast halves of the timeline show different quantities and jump at
 /// the boundary.
@@ -124,21 +123,14 @@ impl NexradField {
         })
     }
 
-    /// The clutter mask applies to reflectivity only. Correlation coefficient
-    /// must stay unmasked or it could never show the low values that are the
-    /// entire reason to look at it, and masking velocity would hide rotation
-    /// inside a debris ball.
+    /// The clutter mask applies to reflectivity only; masking correlation
+    /// would hide the low values it exists to show, and masking velocity
+    /// would hide rotation inside a debris ball.
     ///
-    /// Once a volume is known to carry dual-pol, the mask fails closed: a
-    /// reflectivity gate with no correlation to vouch for it is dropped rather
-    /// than trusted. WSR-88D splits its low elevations into a surveillance cut
-    /// carrying dual-pol and a Doppler cut carrying velocity, and measured
-    /// against KOHX on a night NWS forecast 0% precipitation, 90% of the echo
-    /// on the surveillance cut failed the correlation test (mean 0.66,
-    /// biological scatter) while the Doppler cut beside it had no correlation
-    /// at all and leaked every gate into the column maximum. Failing open on
-    /// missing data means the clutter simply arrives through whichever tilt or
-    /// gate happens to lack it.
+    /// On a dual-pol volume the mask fails closed: a reflectivity gate with
+    /// no valid correlation is dropped. WSR-88D splits low elevations into a
+    /// surveillance cut (dual-pol) and a Doppler cut (velocity only), so
+    /// failing open would let clutter through whichever cut lacks CC.
     fn tilt_value(&self, tilt: &Tilt, at: Coords, product: RadarProduct) -> Option<f32> {
         let polar = self.system.geo_to_polar(
             GeoPoint { latitude: at.lat, longitude: at.lon },
@@ -185,10 +177,8 @@ fn beam_height_km(range_km: f64, elevation_deg: f32) -> f64 {
 
 impl NexradField {
     /// Highest altitude carrying meaningful echo, the standard 18 dBZ contour.
-    ///
-    /// The lowest tilt is deliberately not a floor: a storm whose top is below
-    /// the lowest beam still has a top, and reporting the beam height would
-    /// invent one.
+    /// No echo above the threshold on any tilt means no top, not a top at
+    /// beam height.
     fn echo_top_km(&self, at: Coords) -> Option<f32> {
         const ECHO_TOP_DBZ: f32 = 18.0;
         let mut top: Option<f32> = None;
@@ -409,9 +399,8 @@ mod tests {
         );
     }
 
-    /// The clutter mask must fail closed. Every reflectivity value a dual-pol
-    /// volume reports has to be backed by a valid correlation gate above the
-    /// threshold; anything else is how biological scatter reached the screen.
+    /// Every reflectivity value a dual-pol volume reports must be backed by
+    /// a valid correlation gate above the threshold.
     /// `cargo test clutter_mask_fails_closed -- --ignored --nocapture`
     #[tokio::test]
     #[ignore]

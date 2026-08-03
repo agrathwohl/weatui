@@ -155,7 +155,7 @@ mod tests {
         assert!(r.is_following_live(), "cursor is on the newest frame");
         let text = status_text(&r, CT);
         assert!(text.contains("FCST"), "got: {text}");
-        assert!(!text.contains("LIVE"), "a forecast must never read as live: {text}");
+        assert!(!text.contains("LIVE"), "a forecast frame must not read as live: {text}");
     }
 
     #[test]

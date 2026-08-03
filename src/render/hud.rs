@@ -448,6 +448,7 @@ mod tests {
             distance_km: 42.0,
             bearing: "NE",
             threat,
+            hazards: vec![crate::radar::cells::Hazard::Rain],
         }
     }
 
@@ -475,9 +476,8 @@ mod tests {
         );
     }
 
-    /// Regression: stale + no alerts used to fall past the quiet-path early
-    /// return and append conditions and cells a second time, exactly when the
-    /// FEED STALE banner most needs a legible panel.
+    /// Regression: stale with no alerts once rendered conditions and cells
+    /// twice.
     #[test]
     fn a_stale_feed_does_not_duplicate_the_sections() {
         use crate::radar::cells::CellThreat;

@@ -43,7 +43,7 @@ pub struct Properties {
     pub area_desc: Option<String>,
     pub expires: Option<String>,
     /// Values are arrays of mixed JSON. A non-string value must not abort the
-    /// whole poll, so this is deliberately untyped and read via `param`.
+    /// whole poll, so this stays untyped and is read via `param`.
     #[serde(default)]
     pub parameters: HashMap<String, Vec<serde_json::Value>>,
 }

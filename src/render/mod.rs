@@ -7,6 +7,8 @@ pub mod timeline;
 /// Codepoints taken from the Nerd Fonts glyphnames manifest and confirmed
 /// present in the configured terminal font, whose charset covers e300-e3e3 and
 /// f000-f381. An unmapped codepoint would render as a tofu box.
+pub mod labels;
+
 pub mod glyph {
     pub const TORNADO: char = '\u{e36c}';
     pub const THUNDERSTORM: char = '\u{e31d}';

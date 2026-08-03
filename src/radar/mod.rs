@@ -7,6 +7,7 @@
 pub mod cells;
 pub mod fetch;
 pub mod hrrr;
+pub mod interp;
 pub mod grid;
 pub mod ring;
 
@@ -82,16 +83,11 @@ impl RadarProduct {
         }
     }
 
-    /// How a column of elevation cuts collapses to one value.
-    ///
-    /// Not uniform across products. Reflectivity takes the column maximum
-    /// because that is composite reflectivity, which is what HRRR forecasts.
-    /// The dual-pol and Doppler moments take the lowest cut, since debris
-    /// lofting, rotation and drop shape are all near-ground phenomena.
-    ///
-    /// Correlation specifically must NOT take the column minimum: measured
-    /// against KOHX, that reported the single worst gate anywhere in the
-    /// column and painted ordinary rain as debris across most of the screen.
+    /// How a column of elevation cuts collapses to one value. Reflectivity
+    /// takes the column maximum (composite reflectivity, matching HRRR REFC).
+    /// The dual-pol and Doppler moments read the lowest cut: debris, rotation
+    /// and drop shape are near-ground phenomena, and a column minimum for
+    /// correlation would report the worst gate aloft as ground truth.
     pub fn reduction(self) -> ColumnReduction {
         match self {
             RadarProduct::Reflectivity
@@ -113,7 +109,7 @@ pub enum ColumnReduction {
 
 /// A radar field that can be sampled anywhere for any supported moment.
 ///
-/// Deliberately carries no site or range: those are properties of a radar, and
+/// Carries no site or range: those are properties of a radar, and
 /// an HRRR forecast grid has neither. Keeping them here forced the forecast
 /// implementation to invent values, which is how a caller ends up drawing
 /// coverage geometry for something that has no coverage.

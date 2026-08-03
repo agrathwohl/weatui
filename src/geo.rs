@@ -1,8 +1,7 @@
 //! Geodesy and US location lookup.
 //!
-//! Both tables are embedded rather than fetched at runtime. A tool that exists
-//! to warn about severe weather must resolve a location while the network is
-//! degraded, which is precisely when severe weather is happening.
+//! Both tables are embedded rather than fetched at runtime, so location
+//! lookup works while the network is degraded.
 //!
 //! - ZCTA centroids: US Census 2023 national gazetteer, GEOID/INTPTLAT/INTPTLONG.
 //! - WSR-88D sites: api.weather.gov/radar/stations?stationType=WSR-88D.
@@ -13,6 +12,7 @@ use std::sync::OnceLock;
 
 const ZCTA_CSV: &str = include_str!("data/zcta_centroids.csv");
 const WSR88D_CSV: &str = include_str!("data/wsr88d_sites.csv");
+const PLACES_CSV: &str = include_str!("data/places.csv");
 
 const EARTH_RADIUS_KM: f64 = 6371.0088;
 pub const KM_PER_KNOT_HOUR: f64 = 1.852;
@@ -47,6 +47,40 @@ fn parse_table(csv: &'static str) -> Vec<(&'static str, Coords)> {
 fn zcta_table() -> &'static Vec<(&'static str, Coords)> {
     static TABLE: OnceLock<Vec<(&'static str, Coords)>> = OnceLock::new();
     TABLE.get_or_init(|| parse_table(ZCTA_CSV))
+}
+
+pub struct Place {
+    pub name: &'static str,
+    pub coords: Coords,
+}
+
+fn place_table() -> &'static Vec<Place> {
+    static TABLE: std::sync::OnceLock<Vec<Place>> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        PLACES_CSV
+            .lines()
+            .filter_map(|l| {
+                let mut f = l.split(',');
+                let name = f.next()?;
+                let lat = f.next()?.parse().ok()?;
+                let lon = f.next()?.parse().ok()?;
+                Some(Place { name, coords: Coords { lat, lon } })
+            })
+            .collect()
+    })
+}
+
+/// Places inside the box, biggest first. The table is ordered by land area,
+/// so the first hits are the ones worth labelling.
+pub fn places_within(centre: Coords, half_lat: f64, half_lon: f64, limit: usize) -> Vec<&'static Place> {
+    place_table()
+        .iter()
+        .filter(|p| {
+            (p.coords.lat - centre.lat).abs() <= half_lat
+                && (p.coords.lon - centre.lon).abs() <= half_lon
+        })
+        .take(limit)
+        .collect()
 }
 
 pub(crate) fn radar_table() -> &'static Vec<(&'static str, Coords)> {

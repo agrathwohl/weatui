@@ -1,10 +1,7 @@
-//! Storm cell identification.
-//!
-//! A poor man's SCIT: cluster the composite reflectivity field into connected
-//! cores, then interrogate each core across every moment the volume carries.
-//! The point is not to out-analyse the NWS — warnings remain the authority —
-//! but to tell the user *which* blob on their screen deserves attention and
-//! why, before a warning exists.
+//! Storm cell identification: cluster the composite reflectivity field into
+//! connected cores, then interrogate each core across every moment the
+//! volume carries. Warnings remain the authority; this points at the blob
+//! that deserves attention before one exists.
 
 use crate::geo::Coords;
 use crate::radar::{RadarField, RadarProduct};
@@ -20,34 +17,81 @@ const STEP_DEG: f64 = 0.02;
 /// overshoots the levels these diagnostics need anyway.
 const HALF_EXTENT_DEG: f64 = 2.2;
 const MAX_CELLS: usize = 8;
-/// Cells farther than this from home are noise for a personal alerting tool:
-/// nothing 200 km away is "about to arrive", and listing it buries the storm
-/// that is.
+/// Cells farther than this from home are not listed.
 const MAX_CELL_DISTANCE_KM: f64 = 75.0;
 
 /// Thresholds for the threat ladder, most severe first.
 ///
 /// Rotation evidence is the largest velocity difference between two samples
-/// of the same core no more than [`LOCAL_RADIUS_CELLS`] apart — local shear,
-/// sign-free, so a mesocyclone embedded in strong one-signed flow still
-/// registers, while a long squall line whose opposite ends merely point
-/// different ways along the beam does not. Known limits: Level II velocity
-/// is not dealiased here, so folding can understate a violent couplet or
-/// sharpen a fold boundary into false shear; and VIL / echo top are floors,
-/// not totals, because the beam only samples part of the column.
+/// of the same core within [`LOCAL_RADIUS_CELLS`]: local, sign-free shear.
+/// A mesocyclone embedded in one-signed flow registers; a squall line whose
+/// ends point different ways along the beam does not. Limits: velocity is
+/// not dealiased, so folding can understate a couplet or fake shear at a
+/// fold boundary, and VIL / echo top are floors because the beam samples
+/// part of the column.
 const TDS_MAX_CC: f32 = 0.85;
 const TDS_MIN_ROTATION: f32 = 25.0;
 const ROTATION_SPAN_MS: f32 = 40.0;
 const HAIL_VIL: f32 = 45.0;
 /// ~6-7 km at [`STEP_DEG`] spacing: the scale of a couplet plus grid slack.
 const LOCAL_RADIUS_CELLS: i64 = 3;
-/// A 1-degree beam is ~2.6 km wide at 150 km and ~4.6 km at 260 km — wider
-/// than the couplet it would need to resolve, and ~3+ km above the ground.
-/// Beyond this range a shear pair is an artifact, so rotation and debris
-/// claims are suppressed rather than shown as "rotation 262 km away".
+/// A 1-degree beam is ~2.6 km wide at 150 km, wider than the couplet it
+/// would need to resolve. Beyond this range shear pairs are artifacts, so
+/// rotation and debris claims are suppressed.
 const ROTATION_MAX_RANGE_KM: f64 = 150.0;
 const HAIL_ECHO_TOP_KM: f32 = 14.0;
 const INTENSE_DBZ: f32 = 55.0;
+
+/// Hazard letters for the map, worst first. Wind is a radial-velocity proxy
+/// for damaging gusts; Lightning is a deep-updraft proxy (charge separation
+/// needs a mixed-phase column, so a >= 9 km echo top stands in for it).
+/// Snow is decided at render time from the surface temperature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hazard {
+    Tornado,
+    Hail,
+    Wind,
+    Lightning,
+    Rain,
+}
+
+impl Hazard {
+    pub fn letter(self) -> char {
+        match self {
+            Hazard::Tornado => 'T',
+            Hazard::Hail => 'H',
+            Hazard::Wind => 'W',
+            Hazard::Lightning => 'L',
+            Hazard::Rain => 'R',
+        }
+    }
+}
+
+/// NWS severe gust criterion is 58 mph (~26 m/s).
+const WIND_HAZARD_MS: f32 = 26.0;
+const LIGHTNING_ECHO_TOP_KM: f32 = 9.0;
+
+pub(crate) fn hazards(
+    threat: CellThreat,
+    max_abs_velocity: Option<f32>,
+    max_echo_top_km: Option<f32>,
+) -> Vec<Hazard> {
+    let mut out = Vec::new();
+    if matches!(threat, CellThreat::Debris | CellThreat::Rotation) {
+        out.push(Hazard::Tornado);
+    }
+    if threat == CellThreat::Hail {
+        out.push(Hazard::Hail);
+    }
+    if max_abs_velocity.is_some_and(|v| v >= WIND_HAZARD_MS) {
+        out.push(Hazard::Wind);
+    }
+    if max_echo_top_km.is_some_and(|t| t >= LIGHTNING_ECHO_TOP_KM) {
+        out.push(Hazard::Lightning);
+    }
+    out.push(Hazard::Rain);
+    out
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CellThreat {
@@ -81,6 +125,7 @@ pub struct StormCell {
     pub distance_km: f64,
     pub bearing: &'static str,
     pub threat: CellThreat,
+    pub hazards: Vec<Hazard>,
 }
 
 pub(crate) struct CellStats {
@@ -187,6 +232,9 @@ pub fn scan(field: &dyn RadarField, site: Coords, home: Coords) -> Vec<StormCell
             }
         }
 
+        let max_abs_velocity = velocity.values().fold(None::<f32>, |m, v| {
+            Some(m.map_or(v.abs(), |m| m.max(v.abs())))
+        });
         let mut shear: Option<f32> = None;
         let mut shear_centre: Option<(i64, i64)> = None;
         for (&(ix, iy), &va) in &velocity {
@@ -242,6 +290,7 @@ pub fn scan(field: &dyn RadarField, site: Coords, home: Coords) -> Vec<StormCell
             max_echo_top_km: stats.max_echo_top_km,
             distance_km,
             bearing: crate::geo::compass_bearing(home, centroid),
+            hazards: hazards(classify(&stats), max_abs_velocity, stats.max_echo_top_km),
             threat: classify(&stats),
         });
     }
@@ -515,6 +564,21 @@ mod tests {
             near_cells[0].threat,
             CellThreat::Rotation,
             "the same couplet at 78 km is resolvable and must still register"
+        );
+    }
+
+    #[test]
+    fn hazard_letters_follow_the_cell_diagnostics() {
+        assert_eq!(
+            hazards(CellThreat::Rotation, Some(30.0), Some(12.0)),
+            vec![Hazard::Tornado, Hazard::Wind, Hazard::Lightning, Hazard::Rain]
+        );
+        assert_eq!(hazards(CellThreat::Hail, Some(10.0), Some(9.5)),
+            vec![Hazard::Hail, Hazard::Lightning, Hazard::Rain]);
+        assert_eq!(hazards(CellThreat::Strong, None, Some(5.0)), vec![Hazard::Rain]);
+        assert_eq!(
+            hazards(CellThreat::Debris, Some(40.0), None),
+            vec![Hazard::Tornado, Hazard::Wind, Hazard::Rain]
         );
     }
 

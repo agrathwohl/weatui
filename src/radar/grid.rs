@@ -49,7 +49,7 @@ impl Viewport {
 
     /// Inverse of [`pixel_coords`] in continuous, unclipped pixel space.
     ///
-    /// Deliberately not rounded: `pixel_coords` returns pixel centres, so a
+    /// Not rounded: `pixel_coords` returns pixel centres, so a
     /// round trip lands on `x + 0.5`. Callers that want a pixel index must
     /// floor, while callers drawing vertices want nearest. Rounding here would
     /// shift every round trip by one pixel.

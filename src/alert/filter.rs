@@ -121,8 +121,8 @@ mod tests {
         assert_eq!(filter().classify(&a), Some(ThreatTier::Lethal));
     }
 
-    /// A3: the live snapshot showed Air Quality Alert carrying no VTEC, which is
-    /// exactly why the no-VTEC path must be an allowlist rather than a fallthrough.
+    /// A3: the live snapshot showed Air Quality Alert carrying no VTEC, so
+    /// the no-VTEC path is an allowlist, not a fallthrough.
     #[test]
     fn a3_air_quality_alert_is_rejected() {
         let a = alert_with("Air Quality Alert", None);
@@ -173,7 +173,7 @@ mod tests {
         assert_eq!(filter().classify(&a), None);
     }
 
-    /// A test-class product must never raise a real alarm.
+    /// Test-class products raise no alarms.
     #[test]
     fn non_operational_vtec_is_rejected_even_for_tornado_warning() {
         let a = alert_with(

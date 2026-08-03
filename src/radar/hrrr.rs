@@ -1,10 +1,8 @@
 //! NOAA HRRR forecast reflectivity.
 //!
 //! HRRR is a 3 km convection-allowing model that assimilates radar every 15
-//! minutes. Its `REFC` field is the model's own prediction of composite
-//! reflectivity, so this is a real forecast of where storms will be, not an
-//! extrapolation of where they currently are. It can grow and decay storms and
-//! initiate new ones, none of which translating the present echo can do.
+//! minutes. Its `REFC` field is the model's forecast of composite
+//! reflectivity: it can grow, decay, and initiate storms.
 //!
 //! Each `wrfsubhf{HH}` file holds four REFC records at 15, 30, 45 and 60
 //! minutes past forecast hour HH. The `.idx` sidecar gives byte offsets, so a
@@ -192,10 +190,9 @@ impl HrrrField {
             bail!("expected Lambert Conformal (template 3.30) for HRRR");
         };
 
-        // `index_of` assumes row-major storage running west-to-east then
-        // south-to-north. A different scanning mode would still decode and
-        // still fill the grid, so nothing would look wrong: the echo would
-        // simply be drawn somewhere it is not.
+        // `index_of` assumes row-major storage, west-to-east then
+        // south-to-north. Any other scanning mode would decode cleanly and
+        // draw every echo in the wrong place.
         if !scan.scans_positively_for_i()
             || !scan.scans_positively_for_j()
             || !scan.is_consecutive_for_i()
@@ -760,9 +757,8 @@ mod tests {
         }
     }
 
-    /// Compares what the radar sees against what the model forecasts over the
-    /// same patch, which is the only way to tell a projection bug from the two
-    /// products genuinely disagreeing.
+    /// Compares radar and model over the same patch, to tell a projection
+    /// bug from real disagreement.
     /// `cargo test compare_observed -- --ignored --nocapture`
     #[tokio::test]
     #[ignore]
