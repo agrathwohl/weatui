@@ -40,7 +40,8 @@ pub struct Location {
 }
 
 impl Location {
-    /// Explicit coordinates win over ZIP; ZIP requires a network lookup.
+    /// Explicit coordinates win over ZIP; ZIP resolves offline from the
+    /// embedded centroid table.
     pub fn explicit_coords(&self) -> Option<(f64, f64)> {
         match (self.lat, self.lon) {
             (Some(lat), Some(lon)) => Some((lat, lon)),
