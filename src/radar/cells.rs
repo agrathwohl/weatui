@@ -36,8 +36,15 @@ const MAX_CELL_DISTANCE_KM: f64 = 75.0;
 /// fold boundary, and VIL / echo top are floors because the beam samples
 /// part of the column.
 const TDS_MAX_CC: f32 = 0.85;
+/// One bar for rotation, used both on its own and as the debris corroboration.
+///
+/// These were previously split, 25 to corroborate a CC drop but 40 to count as
+/// rotation alone, which left a 25-39 m/s couplet with no debris signature
+/// classified as merely Intense and given no tornado hazard letter. Trusting a
+/// span as evidence of a couplet in one branch and not the other cannot both be
+/// right, and the lower bar is the safe one: the sampling lattice is coarser
+/// than the couplet it measures, so every span this reports is biased low.
 const TDS_MIN_ROTATION: f32 = 25.0;
-const ROTATION_SPAN_MS: f32 = 40.0;
 const HAIL_VIL: f32 = 45.0;
 /// ~6-7 km at [`STEP_DEG`] spacing: the scale of a couplet plus grid slack.
 const LOCAL_RADIUS_CELLS: i64 = 3;
@@ -191,6 +198,7 @@ pub struct StormCell {
     pub approach: Option<Approach>,
 }
 
+#[derive(Clone)]
 pub(crate) struct CellStats {
     pub max_dbz: f32,
     pub rotation_ms: Option<f32>,
@@ -204,7 +212,7 @@ pub(crate) fn classify(s: &CellStats) -> CellThreat {
     if rotating && s.min_cc.is_some_and(|cc| cc < TDS_MAX_CC) {
         return CellThreat::Debris;
     }
-    if s.rotation_ms.is_some_and(|r| r >= ROTATION_SPAN_MS) {
+    if rotating {
         return CellThreat::Rotation;
     }
     if s.max_vil.is_some_and(|v| v >= HAIL_VIL)
@@ -392,8 +400,12 @@ pub fn scan(field: &dyn RadarField, site: Coords, home: Coords) -> Vec<StormCell
             .map(|(i, _)| i)
             .unwrap();
         if nearest >= MAX_CELLS {
+            // Appended rather than swapped in. Dropping to MAX_CELLS - 1 to
+            // make room evicted the eighth-ranked cell, and in an outbreak
+            // that one can be rotating or dropping debris. One extra row costs
+            // nothing next to losing a tornadic cell off the bottom.
             let keep = cells.remove(nearest);
-            cells.truncate(MAX_CELLS - 1);
+            cells.truncate(MAX_CELLS);
             cells.push(keep);
         } else {
             cells.truncate(MAX_CELLS);
@@ -754,6 +766,48 @@ mod tests {
     }
 
     #[test]
+    fn a_mesocyclone_below_the_old_bar_still_counts_as_rotation() {
+        let base = CellStats {
+            max_dbz: 55.0,
+            rotation_ms: None,
+            min_cc: Some(0.97),
+            max_vil: None,
+            max_echo_top_km: None,
+        };
+
+        for span in [25.0_f32, 30.0, 35.0, 39.0] {
+            let s = CellStats { rotation_ms: Some(span), ..base.clone() };
+            assert_eq!(
+                classify(&s),
+                CellThreat::Rotation,
+                "{span} m/s of shear must not read as a plain intense cell"
+            );
+            assert!(
+                hazards(classify(&s), None, None).contains(&Hazard::Tornado),
+                "{span} m/s must earn a tornado hazard letter"
+            );
+        }
+
+        let quiet = CellStats { rotation_ms: Some(20.0), ..base.clone() };
+        assert_eq!(classify(&quiet), CellThreat::Intense, "below the bar stays intense");
+    }
+
+    #[test]
+    fn debris_still_outranks_bare_rotation_at_the_same_span() {
+        let rotating = CellStats {
+            max_dbz: 55.0,
+            rotation_ms: Some(30.0),
+            min_cc: Some(0.97),
+            max_vil: None,
+            max_echo_top_km: None,
+        };
+        let debris = CellStats { min_cc: Some(0.70), ..rotating.clone() };
+        assert_eq!(classify(&rotating), CellThreat::Rotation);
+        assert_eq!(classify(&debris), CellThreat::Debris);
+        assert!(CellThreat::Debris > CellThreat::Rotation);
+    }
+
+    #[test]
     fn the_nearest_cell_survives_truncation_in_an_outbreak() {
         let field = FnField(move |p, product| match product {
             RadarProduct::Reflectivity => {
@@ -772,7 +826,6 @@ mod tests {
             _ => None,
         });
         let cells = scan(&field, SITE, HOME);
-        assert_eq!(cells.len(), MAX_CELLS);
         let nearest = cells
             .iter()
             .min_by(|a, b| a.distance_km.total_cmp(&b.distance_km))
@@ -780,6 +833,18 @@ mod tests {
         assert!(
             nearest.distance_km < 20.0,
             "the weak cell beside home must not be truncated away"
+        );
+
+        assert_eq!(
+            cells.len(),
+            MAX_CELLS + 1,
+            "rescuing the nearest cell appends it; it must not cost the ranked cell it \
+             used to displace, which in an outbreak can be a rotating one"
+        );
+        assert_eq!(
+            cells.iter().filter(|c| c.max_dbz >= 60.0).count(),
+            MAX_CELLS,
+            "all eight ranked cells survive alongside the rescued one"
         );
     }
 

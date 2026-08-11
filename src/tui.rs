@@ -214,8 +214,17 @@ pub fn resolve_key(pending: &mut Option<char>, key: KeyEvent) -> Action {
 
 pub struct App {
     active: Vec<crate::alert::state::ActiveAlert>,
+    /// Staleness as the alert task last reported it. Never read directly for
+    /// display: a dead task cannot report its own death, so the last snapshot
+    /// stays frozen at whatever it said, and if that was healthy the screen
+    /// keeps promising "no active warnings" forever. Go through
+    /// [`App::feed_health`], which ages it against a clock the alert task does
+    /// not own.
     stale: bool,
     stale_secs: u64,
+    last_snapshot_at: Option<Instant>,
+    started_at: Instant,
+    stale_after_secs: u64,
     ring: FrameRing,
     viewport: Viewport,
     home: Coords,
@@ -249,7 +258,68 @@ pub struct App {
     status: String,
 }
 
+/// What the screen should say about the alert feed, and why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeedHealth {
+    pub stale: bool,
+    pub secs: u64,
+    /// True when staleness was inferred from the alert task going quiet rather
+    /// than from the task reporting it. Distinguishes "the feed is down" from
+    /// "the thing watching the feed is down", which look identical on screen
+    /// but have different causes.
+    pub reporter_silent: bool,
+}
+
+/// Ages the last snapshot against the render loop's own clock.
+///
+/// `reported` is the alert task's own view, which is worthless once that task
+/// dies or blocks on a full channel: no further snapshots arrive and the value
+/// freezes. `silent_for` is measured here, by the consumer, so it keeps growing
+/// whatever happens to the producer.
+pub fn feed_health(
+    reported_stale: bool,
+    reported_secs: u64,
+    silent_for: Duration,
+    stale_after_secs: u64,
+) -> FeedHealth {
+    let silent = silent_for.as_secs();
+    if silent >= stale_after_secs {
+        return FeedHealth {
+            stale: true,
+            secs: silent.max(reported_secs),
+            reporter_silent: true,
+        };
+    }
+    FeedHealth {
+        stale: reported_stale,
+        secs: reported_secs,
+        reporter_silent: false,
+    }
+}
+
 impl App {
+    /// Minutes since the newest observed volume. Only the alert feed had a
+    /// staleness indicator, so a dead radar task left the ring animating old
+    /// frames indefinitely with nothing on screen saying how old they were.
+    fn radar_age_minutes(&self) -> Option<i64> {
+        let newest = self
+            .ring
+            .frames()
+            .filter(|f| !f.projected)
+            .map(|f| f.captured_at)
+            .max()?;
+        Some((chrono::Utc::now() - newest).num_minutes().max(0))
+    }
+
+    fn feed_health(&self) -> FeedHealth {
+        feed_health(
+            self.stale,
+            self.stale_secs,
+            self.last_snapshot_at.unwrap_or(self.started_at).elapsed(),
+            self.stale_after_secs,
+        )
+    }
+
     pub fn new(cfg: &Config, home: Coords, tz: chrono_tz::Tz) -> Result<Self> {
         let site = if cfg.radar.site.eq_ignore_ascii_case("auto") {
             nearest_radar_site(home).context("no WSR-88D site could be selected")?
@@ -262,6 +332,9 @@ impl App {
             active: Vec::new(),
             stale: false,
             stale_secs: 0,
+            last_snapshot_at: None,
+            started_at: Instant::now(),
+            stale_after_secs: cfg.alerts.stale_after_secs,
             // Projections are appended alongside observations, so capacity must
             // cover both. Sizing the ring to `frames` alone means enabling
             // projections silently evicts that many observed volumes.
@@ -707,14 +780,17 @@ impl App {
         );
 
         let home = self.home;
+        let health = self.feed_health();
         let eta = move |alert: &crate::alert::Alert| {
             alert.motion().and_then(|m| m.eta_to(home)).map(|d| d.num_minutes())
         };
         frame.render_widget(
             Hud {
                 active: &self.active,
-                stale: self.stale,
-                stale_secs: self.stale_secs,
+                stale: health.stale,
+                stale_secs: health.secs,
+                reporter_silent: health.reporter_silent,
+                radar_age_min: self.radar_age_minutes(),
                 site: self.site.id,
                 home: self.home,
                 peak_dbz: grid.value_range().map(|(_, hi)| hi),
@@ -1158,6 +1234,7 @@ async fn event_loop(
                     app.active = snapshot.active;
                     app.stale = snapshot.stale;
                     app.stale_secs = snapshot.stale_secs;
+                    app.last_snapshot_at = Some(Instant::now());
                     if let Some(err) = snapshot.dispatch_error {
                         app.status = format!("alert dispatch failed: {err}");
                         continue;
@@ -1253,6 +1330,7 @@ async fn event_loop(
 }
 
 fn setup() -> Result<Terminal<CrosstermBackend<Stdout>>> {
+    install_panic_hook();
     terminal::enable_raw_mode()?;
     let mut out = stdout();
     execute!(out, terminal::EnterAlternateScreen)?;
@@ -1266,8 +1344,52 @@ fn restore(term: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     Ok(())
 }
 
+/// A panic unwinds straight past `restore`, so without this the terminal is
+/// left in raw mode inside the alternate screen and the panic message is
+/// printed *into* that screen, which the terminal then tears down. The user
+/// sees a monitor that vanished with no explanation, which for a program whose
+/// job is warning them is the worst way to fail.
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = terminal::disable_raw_mode();
+        let _ = execute!(std::io::stdout(), terminal::LeaveAlternateScreen);
+        eprintln!("\nweatui crashed. SEVERE WEATHER MONITORING HAS STOPPED.\n");
+        previous(info);
+    }));
+}
+
 #[cfg(test)]
 mod tests {
+    use super::feed_health;
+    use std::time::Duration as StdDuration;
+
+    #[test]
+    fn a_silent_alert_task_goes_stale_even_after_reporting_healthy() {
+        let h = feed_health(false, 0, StdDuration::from_secs(400), 300);
+        assert!(h.stale, "a dead reporter must not leave the screen reading healthy");
+        assert!(h.reporter_silent);
+        assert_eq!(h.secs, 400);
+    }
+
+    #[test]
+    fn a_live_alert_task_is_trusted_while_it_keeps_reporting() {
+        let healthy = feed_health(false, 0, StdDuration::from_secs(5), 300);
+        assert!(!healthy.stale);
+        assert!(!healthy.reporter_silent);
+
+        let feed_down = feed_health(true, 900, StdDuration::from_secs(5), 300);
+        assert!(feed_down.stale, "the task's own staleness report still counts");
+        assert!(!feed_down.reporter_silent, "the feed died, not the monitor");
+        assert_eq!(feed_down.secs, 900);
+    }
+
+    #[test]
+    fn the_worse_of_the_two_ages_is_reported() {
+        let h = feed_health(true, 1000, StdDuration::from_secs(400), 300);
+        assert_eq!(h.secs, 1000, "never understate how long warnings have been missing");
+    }
+
     use super::*;
 
     fn key(c: char) -> KeyEvent {

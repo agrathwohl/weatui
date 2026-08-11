@@ -7,6 +7,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 
+/// NEXRAD VCPs run 4-6 minutes, so a volume older than this means the radar
+/// task has stopped, not that the site is between scans.
+const RADAR_STALE_MINUTES: i64 = 15;
+
 pub fn tier_glyph(event: &str, tier: ThreatTier) -> char {
     let e = event.to_ascii_lowercase();
     if e.contains("tornado") {
@@ -247,6 +251,10 @@ pub struct Hud<'a> {
     pub active: &'a [ActiveAlert],
     pub stale: bool,
     pub stale_secs: u64,
+    /// The alert task stopped reporting, rather than the feed going quiet. The
+    /// user needs to know monitoring itself died, not just that NWS is slow.
+    pub reporter_silent: bool,
+    pub radar_age_min: Option<i64>,
     pub site: &'a str,
     pub home: crate::geo::Coords,
     pub peak_dbz: Option<f32>,
@@ -268,11 +276,19 @@ impl Hud<'_> {
 
         if self.stale {
             lines.push(Line::from(Span::styled(
-                format!(
-                    "{} FEED STALE {}s - YOU ARE NOT BEING WARNED",
-                    glyph::NO_DATA,
-                    self.stale_secs
-                ),
+                if self.reporter_silent {
+                    format!(
+                        "{} MONITOR DEAD {}s - YOU ARE NOT BEING WARNED",
+                        glyph::NO_DATA,
+                        self.stale_secs
+                    )
+                } else {
+                    format!(
+                        "{} FEED STALE {}s - YOU ARE NOT BEING WARNED",
+                        glyph::NO_DATA,
+                        self.stale_secs
+                    )
+                },
                 Style::default()
                     .fg(Color::Rgb(255, 255, 255))
                     .bg(Color::Rgb(180, 0, 0))
@@ -280,13 +296,27 @@ impl Hud<'_> {
             )));
         }
 
-        lines.push(Line::from(Span::styled(
-            match self.peak_dbz {
-                Some(peak) => format!("{} {}  peak {peak:.0} {}", glyph::REFRESH, self.site, self.peak_units),
-                None => format!("{} {}", glyph::REFRESH, self.site),
-            },
-            Style::default().fg(Color::Rgb(140, 140, 150)),
-        )));
+        let radar_line = match self.peak_dbz {
+            Some(peak) => format!("{} {}  peak {peak:.0} {}", glyph::REFRESH, self.site, self.peak_units),
+            None => format!("{} {}", glyph::REFRESH, self.site),
+        };
+        match self.radar_age_min {
+            Some(age) if age >= RADAR_STALE_MINUTES => lines.push(Line::from(Span::styled(
+                format!("{radar_line}  RADAR {age}m OLD"),
+                Style::default()
+                    .fg(Color::Rgb(255, 255, 255))
+                    .bg(Color::Rgb(150, 60, 0))
+                    .add_modifier(Modifier::BOLD),
+            ))),
+            Some(age) => lines.push(Line::from(Span::styled(
+                format!("{radar_line}  {age}m ago"),
+                Style::default().fg(Color::Rgb(140, 140, 150)),
+            ))),
+            None => lines.push(Line::from(Span::styled(
+                radar_line,
+                Style::default().fg(Color::Rgb(140, 140, 150)),
+            ))),
+        }
 
         if let Some(d) = self.conditions.and_then(|c| c.description.clone()) {
             lines.push(Line::from(Span::styled(
@@ -510,7 +540,7 @@ mod tests {
         let hud = Hud {
             active: &active,
             stale: true,
-            stale_secs: 400,
+            stale_secs: 400, reporter_silent: false, radar_age_min: None,
             site: "KOHX",
             home: crate::geo::Coords { lat: 36.0, lon: -87.0 },
             peak_dbz: None,
@@ -576,7 +606,7 @@ mod tests {
         let hud = Hud {
             active: &active,
             stale: false,
-            stale_secs: 0,
+            stale_secs: 0, reporter_silent: false, radar_age_min: None,
             site: "KOHX",
             home: crate::geo::Coords { lat: 36.0, lon: -87.0 },
             peak_dbz: None,
@@ -626,7 +656,7 @@ mod tests {
         let hud = Hud {
             active: &active,
             stale: false,
-            stale_secs: 0,
+            stale_secs: 0, reporter_silent: false, radar_age_min: None,
             site: "KOHX",
             home: crate::geo::Coords { lat: 36.0, lon: -87.0 },
             peak_dbz: None,
@@ -819,7 +849,7 @@ mod tests {
     fn quiet_hud_says_so_explicitly_rather_than_rendering_blank() {
         let active: Vec<ActiveAlert> = Vec::new();
         let eta = |_: &crate::alert::Alert| None;
-        let hud = Hud { active: &active, stale: false, stale_secs: 0, site: "KOHX", home: crate::geo::Coords { lat: 36.0, lon: -87.0 }, peak_dbz: None, peak_units: "dBZ", conditions: None, frame_conditions: None, temp_limits: (32.0, 95.0), cells: &[], selected_cell: None, tz: chrono_tz::America::Chicago, eta_for: &eta };
+        let hud = Hud { active: &active, stale: false, stale_secs: 0, reporter_silent: false, radar_age_min: None, site: "KOHX", home: crate::geo::Coords { lat: 36.0, lon: -87.0 }, peak_dbz: None, peak_units: "dBZ", conditions: None, frame_conditions: None, temp_limits: (32.0, 95.0), cells: &[], selected_cell: None, tz: chrono_tz::America::Chicago, eta_for: &eta };
         let text: String = hud
             .lines()
             .iter()
@@ -828,11 +858,45 @@ mod tests {
         assert!(text.contains("no active warnings"), "got: {text}");
     }
 
+    fn hud_text(stale: bool, secs: u64, reporter_silent: bool, radar_age: Option<i64>) -> String {
+        let active: Vec<ActiveAlert> = Vec::new();
+        let eta = |_: &crate::alert::Alert| None;
+        let hud = Hud { active: &active, stale, stale_secs: secs, reporter_silent, radar_age_min: radar_age, site: "KOHX", home: crate::geo::Coords { lat: 36.0, lon: -87.0 }, peak_dbz: None, peak_units: "dBZ", conditions: None, frame_conditions: None, temp_limits: (32.0, 95.0), cells: &[], selected_cell: None, tz: chrono_tz::America::Chicago, eta_for: &eta };
+        hud.lines().iter().flat_map(|l| l.spans.iter().map(|s| s.content.to_string())).collect()
+    }
+
+    #[test]
+    fn a_dead_monitor_reads_differently_from_a_quiet_feed() {
+        let feed_down = hud_text(true, 420, false, None);
+        assert!(feed_down.contains("FEED STALE"), "got: {feed_down}");
+
+        let monitor_dead = hud_text(true, 420, true, None);
+        assert!(monitor_dead.contains("MONITOR DEAD"), "got: {monitor_dead}");
+        assert!(monitor_dead.contains("NOT BEING WARNED"));
+    }
+
+    #[test]
+    fn an_old_radar_volume_says_so_instead_of_looking_current() {
+        let fresh = hud_text(false, 0, false, Some(3));
+        assert!(fresh.contains("3m ago"), "got: {fresh}");
+        assert!(!fresh.contains("OLD"));
+
+        let stale = hud_text(false, 0, false, Some(90));
+        assert!(stale.contains("RADAR 90m OLD"), "got: {stale}");
+    }
+
+    #[test]
+    fn no_radar_frame_yet_claims_no_age_at_all() {
+        let none = hud_text(false, 0, false, None);
+        assert!(!none.contains("ago"), "got: {none}");
+        assert!(!none.contains("OLD"), "got: {none}");
+    }
+
     #[test]
     fn stale_feed_states_plainly_that_warnings_are_not_arriving() {
         let active: Vec<ActiveAlert> = Vec::new();
         let eta = |_: &crate::alert::Alert| None;
-        let hud = Hud { active: &active, stale: true, stale_secs: 420, site: "KOHX", home: crate::geo::Coords { lat: 36.0, lon: -87.0 }, peak_dbz: None, peak_units: "dBZ", conditions: None, frame_conditions: None, temp_limits: (32.0, 95.0), cells: &[], selected_cell: None, tz: chrono_tz::America::Chicago, eta_for: &eta };
+        let hud = Hud { active: &active, stale: true, stale_secs: 420, reporter_silent: false, radar_age_min: None, site: "KOHX", home: crate::geo::Coords { lat: 36.0, lon: -87.0 }, peak_dbz: None, peak_units: "dBZ", conditions: None, frame_conditions: None, temp_limits: (32.0, 95.0), cells: &[], selected_cell: None, tz: chrono_tz::America::Chicago, eta_for: &eta };
         let text: String = hud
             .lines()
             .iter()
@@ -848,7 +912,7 @@ mod tests {
         let eta = |_: &crate::alert::Alert| None;
         let area = Rect::new(0, 0, 20, 5);
         let mut buf = Buffer::empty(area);
-        Hud { active: &active, stale: false, stale_secs: 0, site: "KOHX", home: crate::geo::Coords { lat: 36.0, lon: -87.0 }, peak_dbz: None, peak_units: "dBZ", conditions: None, frame_conditions: None, temp_limits: (32.0, 95.0), cells: &[], selected_cell: None, tz: chrono_tz::America::Chicago, eta_for: &eta }
+        Hud { active: &active, stale: false, stale_secs: 0, reporter_silent: false, radar_age_min: None, site: "KOHX", home: crate::geo::Coords { lat: 36.0, lon: -87.0 }, peak_dbz: None, peak_units: "dBZ", conditions: None, frame_conditions: None, temp_limits: (32.0, 95.0), cells: &[], selected_cell: None, tz: chrono_tz::America::Chicago, eta_for: &eta }
             .render(area, &mut buf);
     }
 }
