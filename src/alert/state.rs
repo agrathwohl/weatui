@@ -82,6 +82,18 @@ impl AlertState {
 
     /// Returns only the alerts that warrant a fresh desktop notification.
     pub fn ingest(&mut self, incoming: Vec<Alert>, filter: &Filter) -> Vec<Notification> {
+        self.ingest_at(incoming, filter, chrono::Utc::now())
+    }
+
+    /// Expired products are skipped here as well as pruned, and the two have to
+    /// agree. Pruning alone would let an alert the feed still lists past its
+    /// expiry be dropped, re-ingested, and notified again on every single poll.
+    pub fn ingest_at(
+        &mut self,
+        incoming: Vec<Alert>,
+        filter: &Filter,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Vec<Notification> {
         let mut seen: HashSet<AlertKey> = HashSet::new();
         let mut fresh = Vec::new();
 
@@ -89,6 +101,9 @@ impl AlertState {
             let Some(tier) = filter.classify(&alert) else {
                 continue;
             };
+            if alert.expires_at().is_some_and(|t| t <= now) {
+                continue;
+            }
             let key = key_of(&alert);
 
             if alert
@@ -390,7 +405,8 @@ mod tests {
         let mut st = AlertState::new();
         let f = filter();
         let expires = "2026-07-27T07:30:00Z";
-        st.ingest(vec![alert_expiring(TOR_NEW, expires)], &f);
+        let live = chrono::DateTime::parse_from_rfc3339("2026-07-27T07:05:00Z").unwrap().to_utc();
+        st.ingest_at(vec![alert_expiring(TOR_NEW, expires)], &f, live);
         assert_eq!(st.active().count(), 1);
 
         let before = chrono::DateTime::parse_from_rfc3339("2026-07-27T07:20:00Z").unwrap().to_utc();
@@ -400,6 +416,31 @@ mod tests {
         let after = chrono::DateTime::parse_from_rfc3339("2026-07-27T07:31:00Z").unwrap().to_utc();
         assert_eq!(st.prune_expired(after), 1, "past its expiry");
         assert_eq!(st.active().count(), 0);
+    }
+
+    #[test]
+    fn an_expired_alert_the_feed_still_lists_does_not_notify_every_poll() {
+        let mut st = AlertState::new();
+        let f = filter();
+        let expires = "2026-07-27T07:30:00Z";
+        let before = chrono::DateTime::parse_from_rfc3339("2026-07-27T07:10:00Z").unwrap().to_utc();
+        let after = chrono::DateTime::parse_from_rfc3339("2026-07-27T07:31:00Z").unwrap().to_utc();
+
+        assert_eq!(
+            st.ingest_at(vec![alert_expiring(TOR_NEW, expires)], &f, before).len(),
+            1,
+            "notifies once while live"
+        );
+
+        for poll in 0..5 {
+            st.prune_expired(after);
+            let again = st.ingest_at(vec![alert_expiring(TOR_NEW, expires)], &f, after);
+            assert!(
+                again.is_empty(),
+                "poll {poll}: an expired alert the feed still lists must not re-notify"
+            );
+            assert_eq!(st.active().count(), 0, "poll {poll}: and must not come back as active");
+        }
     }
 
     #[test]
