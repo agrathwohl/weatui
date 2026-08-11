@@ -273,11 +273,8 @@ mod tests {
 
     #[test]
     fn a_malformed_vtec_on_a_non_warning_product_still_rejects() {
-        let a = alert_with(
-            "Rip Current Statement",
-            Some("/O.NEW.KBOX.RP.S.NOTANETN.260727T0700Z-260727T1900Z/"),
-        );
-        assert!(a.vtec_unparsed());
+        let a = alert_with("Rip Current Statement", Some("/garbage/"));
+        assert!(a.vtec_unparsed(), "unrecognised is a failure, not something to skip");
         assert_eq!(filter().classify(&a), None, "fail-open is scoped to Warning products");
     }
 

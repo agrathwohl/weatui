@@ -102,9 +102,14 @@ impl AlertState {
             }
             let key = key_of(&alert);
 
-            if alert
-                .primary_vtec()
-                .is_some_and(|v| v.action.terminates_event())
+            // A termination is only obeyed when the whole product parsed. An
+            // upgrade carries CAN for the old event beside NEW for its
+            // replacement, so acting on a CAP whose sibling line was
+            // unreadable retires the old warning and loses the new one.
+            if !alert.vtec_unparsed()
+                && alert
+                    .primary_vtec()
+                    .is_some_and(|v| v.action.terminates_event())
             {
                 self.active.remove(&key);
                 self.notified.remove(&key);
@@ -198,6 +203,15 @@ mod tests {
         let parsed: AlertCollection = serde_json::from_str(&json).unwrap();
         let f: Feature = parsed.features.into_iter().next().unwrap();
         Alert::from_feature(f)
+    }
+
+    fn alert_with_lines(event: &str, lines: &[&str]) -> Alert {
+        let joined = lines.join("\\n");
+        let json = format!(
+            r#"{{"features":[{{"geometry":null,"properties":{{"event":"{event}","parameters":{{"VTEC":["{joined}"]}}}}}}]}}"#
+        );
+        let parsed: AlertCollection = serde_json::from_str(&json).unwrap();
+        Alert::from_feature(parsed.features.into_iter().next().unwrap())
     }
 
     fn filter() -> Filter {
@@ -512,6 +526,30 @@ mod tests {
             true,
         );
         assert_eq!(st.active().count(), 1);
+    }
+
+    #[test]
+    fn a_cancel_beside_an_unreadable_sibling_line_is_not_obeyed() {
+        let mut st = AlertState::new();
+        let f = filter();
+        let now = chrono::Utc::now();
+        st.ingest_at(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f, now, true);
+        assert_eq!(st.active().count(), 1);
+
+        let broken_upgrade = alert_with_lines(
+            "Tornado Warning",
+            &[
+                "/O.CAN.KTLX.TO.W.0012.260727T0710Z-260727T0730Z/",
+                "/O.NEW.KTLX.TO.W.BADETN.260727T0710Z-260727T0800Z/",
+            ],
+        );
+        assert!(broken_upgrade.vtec_unparsed());
+        st.ingest_at(vec![broken_upgrade], &f, now, true);
+        assert_eq!(
+            st.active().count(),
+            1,
+            "a cancellation whose sibling line was unreadable must not retire the warning"
+        );
     }
 
     #[test]

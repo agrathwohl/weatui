@@ -105,19 +105,23 @@ impl Hazard {
 const WIND_HAZARD_MS: f32 = 26.0;
 const LIGHTNING_ECHO_TOP_KM: f32 = 9.0;
 
-pub(crate) fn hazards(
-    threat: CellThreat,
+/// Hazards come from the measurements rather than from the single threat tier.
+/// A tier can only say one thing, so deriving hazards from it alone meant a
+/// hail cell that also crossed a fold silently lost its `H`.
+pub(crate) fn hazards_for(
+    s: &CellStats,
     max_abs_velocity: Option<f32>,
     max_echo_top_km: Option<f32>,
 ) -> Vec<Hazard> {
     let mut out = Vec::new();
-    if threat == CellThreat::Debris {
+    let debris = classify(s) == CellThreat::Debris;
+    if debris {
         out.push(Hazard::Tornado);
     }
-    if threat == CellThreat::PossibleRotation {
+    if possible_rotation(s) && !debris {
         out.push(Hazard::PossibleTornado);
     }
-    if threat == CellThreat::Hail {
+    if has_hail(s) {
         out.push(Hazard::Hail);
     }
     if max_abs_velocity.is_some_and(|v| v >= WIND_HAZARD_MS) {
@@ -230,18 +234,28 @@ pub(crate) struct CellStats {
     pub max_echo_top_km: Option<f32>,
 }
 
+pub(crate) fn has_hail(s: &CellStats) -> bool {
+    s.max_vil.is_some_and(|v| v >= HAIL_VIL)
+        || s.max_echo_top_km.is_some_and(|t| t >= HAIL_ECHO_TOP_KM)
+}
+
+pub(crate) fn possible_rotation(s: &CellStats) -> bool {
+    s.rotation_ms.is_some_and(|r| r >= TDS_MIN_ROTATION)
+}
+
 pub(crate) fn classify(s: &CellStats) -> CellThreat {
     let rotating = s.rotation_ms.is_some_and(|r| r >= TDS_MIN_ROTATION);
     if rotating && s.min_cc.is_some_and(|cc| cc < TDS_MAX_CC) {
         return CellThreat::Debris;
     }
+    // Hail is measured; a possible fold is not. Ranking the uncertain reading
+    // first stripped a real hail cell of its H hazard AND dropped it below
+    // Hail in the ordering, where truncation could then evict it.
+    if has_hail(s) {
+        return CellThreat::Hail;
+    }
     if rotating {
         return CellThreat::PossibleRotation;
-    }
-    if s.max_vil.is_some_and(|v| v >= HAIL_VIL)
-        || s.max_echo_top_km.is_some_and(|t| t >= HAIL_ECHO_TOP_KM)
-    {
-        return CellThreat::Hail;
     }
     if s.max_dbz >= INTENSE_DBZ {
         return CellThreat::Intense;
@@ -419,7 +433,7 @@ pub fn scan(field: &dyn RadarField, site: Coords, home: Coords) -> Vec<StormCell
             max_echo_top_km: stats.max_echo_top_km,
             distance_km,
             bearing: crate::geo::compass_bearing(home, centroid),
-            hazards: hazards(classify(&stats), max_abs_velocity, stats.max_echo_top_km),
+            hazards: hazards_for(&stats, max_abs_velocity, stats.max_echo_top_km),
             threat: classify(&stats),
         });
     }
@@ -852,7 +866,7 @@ mod tests {
                 "{span} m/s is reportable but not confirmable on non-dealiased velocity"
             );
             assert!(
-                hazards(classify(&s), None, None).contains(&Hazard::PossibleTornado),
+                hazards_for(&s, None, None).contains(&Hazard::PossibleTornado),
                 "{span} m/s must still be visible, just not as a confirmed tornado"
             );
         }
@@ -1208,8 +1222,16 @@ mod tests {
 
     #[test]
     fn hazard_letters_follow_the_cell_diagnostics() {
+        let stats = |rot: Option<f32>, cc: Option<f32>, vil: Option<f32>| CellStats {
+            max_dbz: 50.0,
+            rotation_ms: rot,
+            min_cc: cc,
+            max_vil: vil,
+            max_echo_top_km: None,
+        };
+
         assert_eq!(
-            hazards(CellThreat::PossibleRotation, Some(30.0), Some(12.0)),
+            hazards_for(&stats(Some(30.0), Some(0.97), None), Some(30.0), Some(12.0)),
             vec![
                 Hazard::PossibleTornado,
                 Hazard::Wind,
@@ -1218,12 +1240,25 @@ mod tests {
             ],
             "an uncorroborated span gets its own letter, not the confirmed T"
         );
-        assert_eq!(hazards(CellThreat::Hail, Some(10.0), Some(9.5)),
-            vec![Hazard::Hail, Hazard::Lightning, Hazard::Rain]);
-        assert_eq!(hazards(CellThreat::Strong, None, Some(5.0)), vec![Hazard::Rain]);
         assert_eq!(
-            hazards(CellThreat::Debris, Some(40.0), None),
+            hazards_for(&stats(None, None, Some(50.0)), Some(10.0), Some(9.5)),
+            vec![Hazard::Hail, Hazard::Lightning, Hazard::Rain]
+        );
+        assert_eq!(hazards_for(&stats(None, None, None), None, Some(5.0)), vec![Hazard::Rain]);
+        assert_eq!(
+            hazards_for(&stats(Some(30.0), Some(0.7), None), Some(40.0), None),
             vec![Hazard::Tornado, Hazard::Wind, Hazard::Rain]
+        );
+
+        assert_eq!(
+            hazards_for(&stats(Some(30.0), Some(0.97), Some(50.0)), None, None),
+            vec![Hazard::PossibleTornado, Hazard::Hail, Hazard::Rain],
+            "a hail cell that also crosses a fold must keep its H"
+        );
+        assert_eq!(
+            classify(&stats(Some(30.0), Some(0.97), Some(50.0))),
+            CellThreat::Hail,
+            "and must rank as measured hail, not as a possible artifact"
         );
     }
 

@@ -370,7 +370,7 @@ mod tests {
             "Flash Flood Warning",
             &[
                 "/O.NEW.KTLX.FF.W.0003.260727T0700Z-260727T0900Z/",
-                "/00000000T0000Z-000000T0000Z/OO/NR/0/",
+                "/CTRN6.1.ER.260727T0700Z.260727T1200Z.260728T0000Z.NO/",
             ],
         );
         assert!(!a.vtec_unparsed(), "H-VTEC is a different format, not a broken P-VTEC");

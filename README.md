@@ -85,10 +85,28 @@ poll_interval_secs = 5      # api.weather.gov advertises max-age=4
 stale_after_secs = 300      # feed-dead watchdog threshold
 extra_events = ["Special Weather Statement"]  # non-VTEC products to accept
 
-[alerts.tiers]              # P-VTEC phenomenon.significance codes
-lethal = ["TO.W", "EW.W", "FF.W"]   # tornado, extreme wind, flash flood warnings
-severe = ["SV.W", "SQ.W", "DS.W"]   # severe thunderstorm, squall, dust storm
-watch  = ["TO.A", "SV.A"]           # tornado / severe thunderstorm watches
+[alerts.tiers]
+# To ADD products, use these. They extend the shipped defaults:
+extra_lethal = []
+extra_severe = []
+extra_watch  = []
+
+# `lethal`, `severe` and `watch` REPLACE the defaults rather than adding to
+# them, so setting one to a short list silently deletes everything not in it.
+# `lethal = ["TS.W"]` removes TO.W and you stop being told about tornadoes.
+# Only set these if you mean to replace the whole list.
+#
+# The shipped defaults, which are what you would be replacing:
+#   lethal  TO.W EW.W FF.W TS.W SS.W HU.W, plus the civil-emergency messages
+#           (Civil Danger, Evacuation Immediate, Hazardous Materials,
+#           Radiological Hazard, Nuclear Power Plant, Shelter In Place)
+#   severe  SV.W SQ.W DS.W TR.W FA.W FL.W BZ.W IS.W WS.W XH.W EH.W EC.W WC.W
+#           HW.W CF.W AV.W, plus Civil Emergency Message and Law Enforcement
+#           Warning. Heat and cold carry both their current and retired codes.
+#   watch   TO.A SV.A HU.A TR.A SS.A TS.A FF.A BZ.A WS.A XH.A EC.A WC.A
+#
+# Entries are P-VTEC phenomenon.significance codes, or literal event names for
+# the civil-emergency products that carry no VTEC.
 
 [alerts.notify]             # notify-send urgency per tier:
 lethal = "critical"         #   none / low / normal / critical

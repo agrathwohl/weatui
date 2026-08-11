@@ -75,13 +75,17 @@ async fn main() -> Result<()> {
     for problem in &script_problems {
         eprintln!("weatui: {problem}");
     }
-    // A tier silenced to "none" has the script as its ONLY channel, so an
-    // unusable one means that tier cannot be delivered at all. Starting anyway
-    // would present as a working monitor with a hole in it.
-    if !script_problems.is_empty() && !cfg.alerts.notify.uses_desktop_daemon() {
+    // Checked per tier, not globally. A tier silenced to "none" has its script
+    // as the ONLY channel, and a global check passes as long as some OTHER
+    // tier still has the desktop daemon, which leaves the silenced tier with
+    // nothing. Starting then presents as a working monitor with a hole in it.
+    let dead = notify::tiers_with_no_working_channel(&cfg.alerts.notify, &cfg.alerts.scripts);
+    if !dead.is_empty() {
         anyhow::bail!(
-            "every tier is silenced, so [alerts.scripts] is the only delivery channel, \
-             and it is unusable. Refusing to start as a monitor that cannot warn you"
+            "the {} tier(s) are silenced and their [alerts.scripts] entries cannot run, \
+             so those alerts have no delivery channel at all. Refusing to start as a \
+             monitor that cannot warn you",
+            dead.join(", ")
         );
     }
 

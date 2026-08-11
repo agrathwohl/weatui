@@ -65,13 +65,16 @@ pub struct VtecCode {
     pub etn: u16,
 }
 
-/// P-VTEC opens with a one-character product class then an action, e.g.
-/// `/O.NEW.…`. H-VTEC has a different shape and is not a failed P-VTEC.
-fn is_p_vtec_candidate(line: &str) -> bool {
-    let body = line.trim_start_matches('/');
-    let mut parts = body.split('.');
-    matches!(parts.next(), Some(c) if c.len() == 1)
-        && matches!(parts.next(), Some(a) if a.len() == 3)
+/// Whether a line is H-VTEC, the hydrologic sibling format.
+///
+/// Only a positive identification is allowed to skip a line. Skipping anything
+/// merely "unrecognised" let a Tornado Warning carrying `/garbage/` report zero
+/// parse failures, so the fail-open path never triggered and the warning was
+/// discarded in silence. H-VTEC opens with a five-character NWSLI where
+/// P-VTEC has a one-character product class.
+fn is_h_vtec(line: &str) -> bool {
+    let body = line.trim().trim_start_matches('/').trim_end_matches('/');
+    body.split('.').next().is_some_and(|first| first.len() == 5)
 }
 
 impl VtecCode {
@@ -157,7 +160,7 @@ impl VtecCode {
         let mut failed = 0;
         for line in raws.iter().flat_map(|r| r.split('\n')) {
             let trimmed = line.trim();
-            if trimmed.is_empty() || !is_p_vtec_candidate(trimmed) {
+            if trimmed.is_empty() || is_h_vtec(trimmed) {
                 continue;
             }
             match VtecCode::parse(trimmed) {

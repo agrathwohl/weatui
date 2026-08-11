@@ -135,7 +135,12 @@ impl AlertEngine {
             }
         };
 
-        self.state.prune_expired(chrono::Utc::now());
+        // Only a whole snapshot may drive expiry. If the feature that failed
+        // to parse was an extension carrying a later expiry, the retained old
+        // copy would expire locally and take a live warning with it.
+        if out.dropped_features == 0 {
+            self.state.prune_expired(chrono::Utc::now());
+        }
 
         if let Some(gap) = gap_to_report(gap_before_poll, succeeded, self.stale_after_secs) {
             out.recovered_after_gap_secs = Some(gap);

@@ -121,20 +121,41 @@ pub fn build_args(summary: &str, body: &str, urgency: Urgency) -> Vec<String> {
 /// first alert, which is exactly when nobody is reading stderr. Checked at
 /// startup instead, alongside the desktop backend.
 pub fn preflight_scripts(scripts: &Scripts) -> Vec<String> {
-    let mut problems = Vec::new();
-    for path in scripts.all() {
-        match std::fs::metadata(path) {
-            Err(e) => problems.push(format!("alert script {path} is unusable: {e}")),
-            Ok(m) => {
-                use std::os::unix::fs::PermissionsExt;
-                if m.permissions().mode() & 0o111 == 0 {
-                    problems.push(format!("alert script {path} is not executable"));
-                }
-            }
+    scripts.all().filter_map(script_problem).collect()
+}
+
+/// Tiers whose ONLY channel is a script that will not run. Checked per tier,
+/// because a global check passes as long as some other tier still has the
+/// desktop daemon, leaving the silenced tier with nothing.
+pub fn tiers_with_no_working_channel(
+    levels: &NotifyLevels,
+    scripts: &Scripts,
+) -> Vec<&'static str> {
+    [
+        ("lethal", levels.lethal, ThreatTier::Lethal),
+        ("severe", levels.severe, ThreatTier::Severe),
+        ("watch", levels.watch, ThreatTier::Watch),
+    ]
+    .into_iter()
+    .filter(|(_, level, _)| *level == Urgency::None)
+    .filter(|(_, _, tier)| {
+        scripts.for_tier(*tier).is_none_or(|p| script_problem(p).is_some())
+    })
+    .map(|(name, _, _)| name)
+    .collect()
+}
+
+fn script_problem(path: &str) -> Option<String> {
+    match std::fs::metadata(path) {
+        Err(e) => Some(format!("alert script {path} is unusable: {e}")),
+        Ok(m) => {
+            use std::os::unix::fs::PermissionsExt;
+            (m.permissions().mode() & 0o111 == 0)
+                .then(|| format!("alert script {path} is not executable"))
         }
     }
-    problems
 }
+
 
 pub fn preflight() -> Result<Backend> {
     match backend() {
@@ -656,6 +677,33 @@ mod tests {
         assert!(critical.contains("sound-name"), "got: {critical}");
         let normal = build_args("s", "b", Urgency::Normal).join(" ");
         assert!(!normal.contains("sound-name"), "got: {normal}");
+    }
+
+    #[test]
+    fn a_silenced_tier_with_a_broken_script_is_caught_even_when_others_are_fine() {
+        let levels = NotifyLevels {
+            lethal: Urgency::None,
+            severe: Urgency::Critical,
+            watch: Urgency::Normal,
+        };
+        let scripts = Scripts {
+            lethal: Some("/nonexistent/siren.sh".to_string()),
+            severe: None,
+            watch: None,
+        };
+        assert_eq!(
+            tiers_with_no_working_channel(&levels, &scripts),
+            vec!["lethal"],
+            "a global check passes here because severe still has the desktop daemon, \
+             leaving tornado warnings with no channel at all"
+        );
+    }
+
+    #[test]
+    fn tiers_using_the_desktop_daemon_are_not_flagged() {
+        let levels = NotifyLevels::default();
+        let scripts = Scripts { lethal: None, severe: None, watch: None };
+        assert!(tiers_with_no_working_channel(&levels, &scripts).is_empty());
     }
 
     #[test]
