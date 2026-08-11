@@ -1,15 +1,74 @@
-//! Desktop notification via `notify-send`.
+//! Desktop notification, by whatever channel the host actually has.
 //!
 //! A shell-out rather than a D-Bus client crate: mako is already
 //! running and already styles `[urgency=critical]`, so `notify-send -u` maps
 //! straight onto configuration the user has written. Notification bodies stay
 //! plain ASCII because the daemon's font may lack Nerd Font glyphs.
+//!
+//! macOS has no `notify-send`. `UNUserNotificationCenter` is the correct API
+//! there but only works from inside a signed `.app` bundle, which a bare
+//! binary is not, so this shells out too.
 
 use crate::alert::filter::ThreatTier;
 use crate::alert::state::Notification;
 use crate::config::{NotifyLevels, Scripts, Urgency};
 use anyhow::{Context, Result};
 use std::process::Command;
+use std::sync::OnceLock;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    NotifySend,
+    /// Preferred on macOS. Ships its own `.app`, so it owns a bundle id and
+    /// therefore its own row in System Settings > Notifications, where it can
+    /// be set to persistent alerts and allowed through Focus and the lock
+    /// screen. Supports `-ignoreDnD`.
+    TerminalNotifier,
+    /// Last resort on macOS. Posts as `com.apple.ScriptEditor2`, so it inherits
+    /// Script Editor's notification permission and is silently suppressed when
+    /// that is off, while still exiting 0. Never trust it as the only channel.
+    OsaScript,
+    None,
+}
+
+impl Backend {
+    pub fn label(self) -> &'static str {
+        match self {
+            Backend::NotifySend => "notify-send",
+            Backend::TerminalNotifier => "terminal-notifier",
+            Backend::OsaScript => "osascript",
+            Backend::None => "none",
+        }
+    }
+}
+
+fn on_path(bin: &str) -> bool {
+    Command::new(bin)
+        .arg("-help")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok()
+}
+
+pub fn detect_backend() -> Backend {
+    if on_path("notify-send") {
+        return Backend::NotifySend;
+    }
+    if on_path("terminal-notifier") {
+        return Backend::TerminalNotifier;
+    }
+    if std::path::Path::new("/usr/bin/osascript").exists() {
+        return Backend::OsaScript;
+    }
+    Backend::None
+}
+
+/// Probing spawns processes, so it happens once rather than per alert.
+pub fn backend() -> Backend {
+    static DETECTED: OnceLock<Backend> = OnceLock::new();
+    *DETECTED.get_or_init(detect_backend)
+}
 
 pub fn urgency_for(tier: ThreatTier, levels: &NotifyLevels) -> Urgency {
     match tier {
@@ -42,19 +101,22 @@ pub fn build_args(summary: &str, body: &str, urgency: Urgency) -> Vec<String> {
 
 /// `notify-send` missing is not discoverable at alert time: the first symptom
 /// is a warning that never arrives. Checked once at startup instead.
-pub fn preflight() -> Result<()> {
-    let found = Command::new("notify-send")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    match found {
-        Ok(s) if s.success() => Ok(()),
-        Ok(s) => anyhow::bail!("notify-send exited with {s}; desktop alerts will not be delivered"),
-        Err(e) => Err(e).context(
-            "notify-send not found; desktop alerts will not be delivered. \
-             Install libnotify, or configure [alerts.scripts] instead",
+pub fn preflight() -> Result<Backend> {
+    match backend() {
+        Backend::None => anyhow::bail!(
+            "no desktop notification channel found; alerts will not be delivered. \
+             Install libnotify (Linux) or terminal-notifier (macOS), \
+             or configure [alerts.scripts] and set [alerts.notify] to \"none\""
         ),
+        Backend::OsaScript => {
+            anyhow::bail!(
+                "falling back to osascript, which posts as Script Editor and is \
+                 silently suppressed unless Script Editor is allowed in System \
+                 Settings > Notifications. Install terminal-notifier for a channel \
+                 that owns its own notification permission"
+            )
+        }
+        b => Ok(b),
     }
 }
 
@@ -99,15 +161,93 @@ pub fn body_for(n: &Notification, eta_minutes: Option<i64>) -> String {
     parts.join("\n")
 }
 
-fn run(args: &[String]) -> Result<()> {
-    let status = Command::new("notify-send")
+pub fn terminal_notifier_args(summary: &str, body: &str, urgency: Urgency) -> Vec<String> {
+    let mut args = vec![
+        "-title".to_string(),
+        summary.to_string(),
+        "-message".to_string(),
+        body.to_string(),
+    ];
+    if urgency == Urgency::Critical {
+        args.push("-sound".to_string());
+        args.push("Sosumi".to_string());
+        args.push("-ignoreDnD".to_string());
+    }
+    args
+}
+
+/// AppleScript string literals take backslash escapes, so both the escape
+/// character and the quote have to be escaped, backslash first.
+pub fn escape_applescript(raw: &str) -> String {
+    raw.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+pub fn osascript_program(summary: &str, body: &str, urgency: Urgency) -> String {
+    let mut s = format!(
+        "display notification \"{}\" with title \"{}\"",
+        escape_applescript(body),
+        escape_applescript(summary)
+    );
+    if urgency == Urgency::Critical {
+        s.push_str(" sound name \"Sosumi\"");
+    }
+    s
+}
+
+/// Every macOS banner route is subject to Focus and the lock screen, and all of
+/// them exit 0 when suppressed. Audio is not suppressible the same way, so a
+/// critical alert also plays a repeating tone. Detached, because the alert loop
+/// must not block for the length of an alarm.
+#[cfg(target_os = "macos")]
+fn sound_the_alarm(urgency: Urgency) {
+    if urgency != Urgency::Critical {
+        return;
+    }
+    let _ = Command::new("/bin/sh")
+        .arg("-c")
+        .arg(
+            "for _ in 1 2 3 4 5 6 7 8; do \
+             /usr/bin/afplay /System/Library/Sounds/Sosumi.aiff; sleep 1; done",
+        )
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|mut c| std::thread::spawn(move || c.wait()));
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sound_the_alarm(_urgency: Urgency) {}
+
+fn spawn_status(bin: &str, args: &[String]) -> Result<()> {
+    let status = Command::new(bin)
         .args(args)
         .status()
-        .context("failed to run notify-send; is libnotify installed?")?;
+        .with_context(|| format!("failed to run {bin}"))?;
     if !status.success() {
-        anyhow::bail!("notify-send exited with {status}");
+        anyhow::bail!("{bin} exited with {status}");
     }
     Ok(())
+}
+
+fn run(summary: &str, body: &str, urgency: Urgency) -> Result<()> {
+    let result = match backend() {
+        Backend::NotifySend => spawn_status("notify-send", &build_args(summary, body, urgency)),
+        Backend::TerminalNotifier => spawn_status(
+            "terminal-notifier",
+            &terminal_notifier_args(summary, body, urgency),
+        ),
+        Backend::OsaScript => spawn_status(
+            "/usr/bin/osascript",
+            &["-e".to_string(), osascript_program(summary, body, urgency)],
+        ),
+        Backend::None => Err(anyhow::anyhow!(
+            "no desktop notification channel is available; \
+             install libnotify or terminal-notifier, or configure [alerts.scripts]"
+        )),
+    };
+    sound_the_alarm(urgency);
+    result
 }
 
 pub fn send(n: &Notification, levels: &NotifyLevels, eta_minutes: Option<i64>) -> Result<()> {
@@ -115,7 +255,7 @@ pub fn send(n: &Notification, levels: &NotifyLevels, eta_minutes: Option<i64>) -
     if urgency == Urgency::None {
         return Ok(());
     }
-    run(&build_args(&summary_for(n), &body_for(n, eta_minutes), urgency))
+    run(&summary_for(n), &body_for(n, eta_minutes), urgency)
 }
 
 /// Environment handed to a per-tier alert script. Everything the notification
@@ -214,7 +354,7 @@ fn desktop_or_skip(levels: &NotifyLevels, summary: &str, body: &str) -> Result<(
     if !levels.uses_desktop_daemon() {
         return Ok(());
     }
-    run(&build_args(summary, body, Urgency::Critical))
+    run(summary, body, Urgency::Critical)
 }
 
 pub fn stale_notification(elapsed_secs: u64) -> Notification {
@@ -322,6 +462,57 @@ mod tests {
     fn body_includes_eta_when_a_motion_vector_was_available() {
         let b = body_for(&notification(ThreatTier::Lethal, "Tornado Warning"), Some(11));
         assert!(b.contains("11 min"), "got: {b}");
+    }
+
+    #[test]
+    fn applescript_escaping_handles_quotes_and_backslashes() {
+        assert_eq!(escape_applescript(r#"say "hi""#), r#"say \"hi\""#);
+        assert_eq!(escape_applescript(r"back\slash"), r"back\\slash");
+        assert_eq!(escape_applescript(r#"both\"#), r"both\\");
+    }
+
+    #[test]
+    fn an_injected_quote_cannot_break_out_of_the_applescript_literal() {
+        let nasty = r#"" & (do shell script "rm -rf /") & ""#;
+        let escaped = escape_applescript(nasty);
+
+        let mut prev = '\0';
+        for (i, c) in escaped.char_indices() {
+            if c == '"' {
+                assert_eq!(
+                    prev, '\\',
+                    "unescaped quote at {i} would close the literal early: {escaped}"
+                );
+            }
+            prev = if prev == '\\' && c == '\\' { '\0' } else { c };
+        }
+        assert!(osascript_program("t", nasty, Urgency::Normal).starts_with("display notification"));
+    }
+
+    #[test]
+    fn terminal_notifier_asks_for_sound_and_dnd_only_when_critical() {
+        let critical = terminal_notifier_args("s", "b", Urgency::Critical).join(" ");
+        assert!(critical.contains("-sound Sosumi"), "got: {critical}");
+        assert!(critical.contains("-ignoreDnD"), "got: {critical}");
+
+        let normal = terminal_notifier_args("s", "b", Urgency::Normal).join(" ");
+        assert!(!normal.contains("-sound"), "got: {normal}");
+        assert!(!normal.contains("-ignoreDnD"), "got: {normal}");
+    }
+
+    #[test]
+    fn osascript_requests_a_sound_only_when_critical() {
+        assert!(osascript_program("t", "b", Urgency::Critical).contains("sound name"));
+        assert!(!osascript_program("t", "b", Urgency::Normal).contains("sound name"));
+    }
+
+    #[test]
+    fn a_backend_is_found_on_this_host() {
+        assert_ne!(
+            detect_backend(),
+            Backend::None,
+            "neither notify-send, terminal-notifier nor osascript is present"
+        );
     }
 
     #[test]

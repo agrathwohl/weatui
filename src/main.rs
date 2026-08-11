@@ -69,10 +69,12 @@ async fn main() -> Result<()> {
     let cfg = config::Config::load()?;
     let home = resolve_home(&cfg)?;
 
-    if cfg.alerts.notify.uses_desktop_daemon()
-        && let Err(e) = notify::preflight()
-    {
-        eprintln!("weatui: {e:#}");
+    if cfg.alerts.notify.uses_desktop_daemon() {
+        match notify::preflight() {
+            Ok(b) if mode == Mode::Daemon => println!("weatui: notifying via {}", b.label()),
+            Ok(_) => {}
+            Err(e) => eprintln!("weatui: {e:#}"),
+        }
     }
 
     if mode == Mode::Daemon {
