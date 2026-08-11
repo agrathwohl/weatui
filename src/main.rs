@@ -69,6 +69,8 @@ async fn main() -> Result<()> {
     let cfg = config::Config::load()?;
     let home = resolve_home(&cfg)?;
 
+    notify::set_hazard_link(home);
+
     if cfg.alerts.notify.uses_desktop_daemon() {
         match notify::preflight() {
             Ok(b) if mode == Mode::Daemon => println!("weatui: notifying via {}", b.label()),

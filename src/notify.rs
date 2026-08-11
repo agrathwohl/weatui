@@ -70,6 +70,18 @@ pub fn backend() -> Backend {
     *DETECTED.get_or_init(detect_backend)
 }
 
+static HAZARD_LINK: OnceLock<String> = OnceLock::new();
+
+/// Home does not move for the life of the process, so the click target is set
+/// once at startup rather than threaded through every notification signature.
+pub fn set_hazard_link(home: crate::geo::Coords) {
+    let _ = HAZARD_LINK.set(hazard_page(home));
+}
+
+fn hazard_link() -> Option<&'static str> {
+    HAZARD_LINK.get().map(String::as_str)
+}
+
 pub fn urgency_for(tier: ThreatTier, levels: &NotifyLevels) -> Urgency {
     match tier {
         ThreatTier::Lethal => levels.lethal,
@@ -161,13 +173,32 @@ pub fn body_for(n: &Notification, eta_minutes: Option<i64>) -> String {
     parts.join("\n")
 }
 
-pub fn terminal_notifier_args(summary: &str, body: &str, urgency: Urgency) -> Vec<String> {
+/// The point forecast page, which lists every active hazard for a location in
+/// human-readable form. The alert's own `@id` is the GeoJSON API URL and would
+/// open as raw JSON, and `web` is only ever `weather.gov`.
+pub fn hazard_page(home: crate::geo::Coords) -> String {
+    format!(
+        "https://forecast.weather.gov/MapClick.php?lat={:.4}&lon={:.4}",
+        home.lat, home.lon
+    )
+}
+
+pub fn terminal_notifier_args(
+    summary: &str,
+    body: &str,
+    urgency: Urgency,
+    link: Option<&str>,
+) -> Vec<String> {
     let mut args = vec![
         "-title".to_string(),
         summary.to_string(),
         "-message".to_string(),
         body.to_string(),
     ];
+    if let Some(url) = link {
+        args.push("-open".to_string());
+        args.push(url.to_string());
+    }
     if urgency == Urgency::Critical {
         args.push("-sound".to_string());
         args.push("Sosumi".to_string());
@@ -235,7 +266,7 @@ fn run(summary: &str, body: &str, urgency: Urgency) -> Result<()> {
         Backend::NotifySend => spawn_status("notify-send", &build_args(summary, body, urgency)),
         Backend::TerminalNotifier => spawn_status(
             "terminal-notifier",
-            &terminal_notifier_args(summary, body, urgency),
+            &terminal_notifier_args(summary, body, urgency, hazard_link()),
         ),
         Backend::OsaScript => spawn_status(
             "/usr/bin/osascript",
@@ -270,6 +301,10 @@ pub fn script_env(n: &Notification, eta_minutes: Option<i64>) -> Vec<(String, St
             "WEATUI_ETA_MINUTES".into(),
             eta_minutes.map(|m| m.to_string()).unwrap_or_default(),
         ),
+        ("WEATUI_DAMAGE_THREAT".into(), n.damage_threat.clone().unwrap_or_default()),
+        ("WEATUI_TORNADO_DETECTION".into(), n.tornado_detection.clone().unwrap_or_default()),
+        ("WEATUI_INSTRUCTION".into(), n.instruction.clone().unwrap_or_default()),
+        ("WEATUI_URL".into(), hazard_link().unwrap_or_default().to_string()),
     ]
 }
 
@@ -491,13 +526,32 @@ mod tests {
 
     #[test]
     fn terminal_notifier_asks_for_sound_and_dnd_only_when_critical() {
-        let critical = terminal_notifier_args("s", "b", Urgency::Critical).join(" ");
+        let critical = terminal_notifier_args("s", "b", Urgency::Critical, None).join(" ");
         assert!(critical.contains("-sound Sosumi"), "got: {critical}");
         assert!(critical.contains("-ignoreDnD"), "got: {critical}");
 
-        let normal = terminal_notifier_args("s", "b", Urgency::Normal).join(" ");
+        let normal = terminal_notifier_args("s", "b", Urgency::Normal, None).join(" ");
         assert!(!normal.contains("-sound"), "got: {normal}");
         assert!(!normal.contains("-ignoreDnD"), "got: {normal}");
+    }
+
+    #[test]
+    fn a_click_target_is_offered_when_one_is_known() {
+        let with_link =
+            terminal_notifier_args("s", "b", Urgency::Critical, Some("https://example.test/x"))
+                .join(" ");
+        assert!(with_link.contains("-open https://example.test/x"), "got: {with_link}");
+        assert!(!terminal_notifier_args("s", "b", Urgency::Critical, None).join(" ").contains("-open"));
+    }
+
+    #[test]
+    fn the_hazard_page_is_a_human_page_not_the_geojson_api() {
+        let url = hazard_page(crate::geo::Coords { lat: 36.8475, lon: -81.7262 });
+        assert_eq!(
+            url,
+            "https://forecast.weather.gov/MapClick.php?lat=36.8475&lon=-81.7262"
+        );
+        assert!(!url.contains("api.weather.gov"), "the API url renders as raw JSON");
     }
 
     #[test]
