@@ -1,13 +1,12 @@
 # weatui
 
-A terminal weather radar and severe-weather alerting application: live NEXRAD
-Level II radar, HRRR forecast frames, and desktop notifications for warnings
-that can kill you. Truecolor TUI, vim keys.
+> A terminal weather radar and severe-weather alerting daemon that tries
+> to help you not die.
 
 ![weatui main view](assets/main.png)
 
-*Live composite reflectivity from KPAH with distance rings, the home
-crosshair, and current surface conditions in the HUD.*
+_Live composite reflectivity from KPAH with distance rings, the home
+crosshair, and current surface conditions in the HUD._
 
 ## What it does
 
@@ -29,8 +28,8 @@ crosshair, and current surface conditions in the HUD.*
 
 ![forecast frame](assets/forecast.png)
 
-*A forecast frame (`FCST` in the timeline): HRRR's prediction for 90 minutes
-from now.*
+_A forecast frame (`FCST` in the timeline): HRRR's prediction for 90 minutes
+from now._
 
 ## Install
 
@@ -121,26 +120,26 @@ weatui -d     # headless daemon: notifications only, no UI
 
 ![help overlay](assets/help.png)
 
-*The `?` overlay over a forecast frame. The yellow patch is the storm core
-HRRR predicts.*
+_The `?` overlay over a forecast frame. The yellow patch is the storm core
+HRRR predicts._
 
-| | |
-|---|---|
-| `h` `j` `k` `l` | pan west / south / north / east |
-| `C-d` `C-u` | pan half a screen |
-| `zi` `zo` | zoom in / out |
-| `gh` | recenter on home |
-| `[` `]` | previous / next frame |
-| `gg` / `G` | oldest frame / newest (follow live) |
-| `space` | play / pause the loop |
-| `<` `>` | slower / faster playback |
-| `1` `2` `3` | base layer: reflectivity / echo top / VIL |
-| `4` `5` `6` `7` | toggle augmentation: velocity / debris (CC) / ZDR / spectrum width |
-| `m` | toggle the map layer (county borders, city names) |
-| `t` | toggle hazard letters on storm cells |
-| `f` | forecast horizon: +2 h (15-min steps) / +6 h / +18 h |
-| `?` | help overlay |
-| `q` `Esc` `ZZ` `C-c` | quit |
+|                      |                                                                    |
+| -------------------- | ------------------------------------------------------------------ |
+| `h` `j` `k` `l`      | pan west / south / north / east                                    |
+| `C-d` `C-u`          | pan half a screen                                                  |
+| `zi` `zo`            | zoom in / out                                                      |
+| `gh`                 | recenter on home                                                   |
+| `[` `]`              | previous / next frame                                              |
+| `gg` / `G`           | oldest frame / newest (follow live)                                |
+| `space`              | play / pause the loop                                              |
+| `<` `>`              | slower / faster playback                                           |
+| `1` `2` `3`          | base layer: reflectivity / echo top / VIL                          |
+| `4` `5` `6` `7`      | toggle augmentation: velocity / debris (CC) / ZDR / spectrum width |
+| `m`                  | toggle the map layer (county borders, city names)                  |
+| `t`                  | toggle hazard letters on storm cells                               |
+| `f`                  | forecast horizon: +2 h (15-min steps) / +6 h / +18 h               |
+| `?`                  | help overlay                                                       |
+| `q` `Esc` `ZZ` `C-c` | quit                                                               |
 
 ### Layers
 
@@ -191,14 +190,14 @@ marine and surf products are out of scope.
 
 ## Data sources
 
-| What | Where |
-|---|---|
-| Live radar | NEXRAD Level II realtime chunks (AWS Open Data) |
-| Radar history | NEXRAD Level II archive |
+| What           | Where                                                                    |
+| -------------- | ------------------------------------------------------------------------ |
+| Live radar     | NEXRAD Level II realtime chunks (AWS Open Data)                          |
+| Radar history  | NEXRAD Level II archive                                                  |
 | Forecast radar | HRRR `wrfsubhf` sub-hourly GRIB2, byte-ranged via `.idx` (AWS Open Data) |
-| Alerts | api.weather.gov CAP/GeoJSON |
-| Conditions | api.weather.gov station observations |
-| Geocoding | embedded Census ZCTA centroids (offline) |
-| Timezone | api.weather.gov points; times display in the watched location's zone |
+| Alerts         | api.weather.gov CAP/GeoJSON                                              |
+| Conditions     | api.weather.gov station observations                                     |
+| Geocoding      | embedded Census ZCTA centroids (offline)                                 |
+| Timezone       | api.weather.gov points; times display in the watched location's zone     |
 
 All US-government sources; no API keys required.
