@@ -144,6 +144,18 @@ pub struct NotifyLevels {
     pub watch: Urgency,
 }
 
+impl NotifyLevels {
+    /// False when every tier is silenced, which is the supported macOS setup:
+    /// there is no `notify-send`, so alerts go out through `[alerts.scripts]`
+    /// instead. Callers use this to skip the desktop daemon rather than
+    /// reporting a failure the user has already deliberately configured away.
+    pub fn uses_desktop_daemon(&self) -> bool {
+        [self.lethal, self.severe, self.watch]
+            .iter()
+            .any(|u| *u != Urgency::None)
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Radar {

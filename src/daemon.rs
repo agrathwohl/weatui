@@ -183,7 +183,7 @@ pub async fn run(cfg: Config, home: Coords, echo_to_stdout: bool) -> Result<()> 
             if echo_to_stdout {
                 eprintln!("weatui: polling resumed after a {}s gap", gap);
             }
-            if let Err(e) = notify::send_gap_recovery(gap, &cfg.alerts.scripts) {
+            if let Err(e) = notify::send_gap_recovery(gap, &cfg.alerts.notify, &cfg.alerts.scripts) {
                 eprintln!("weatui: gap recovery notice failed: {e:#}");
             }
         }
@@ -193,7 +193,7 @@ pub async fn run(cfg: Config, home: Coords, echo_to_stdout: bool) -> Result<()> 
             if echo_to_stdout {
                 eprintln!("weatui: alert feed stale for {}s", elapsed);
             }
-            if let Err(e) = notify::send_stale_warning(elapsed, &cfg.alerts.scripts) {
+            if let Err(e) = notify::send_stale_warning(elapsed, &cfg.alerts.notify, &cfg.alerts.scripts) {
                 eprintln!("weatui: stale warning failed: {e:#}");
             }
         }

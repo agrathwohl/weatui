@@ -179,7 +179,7 @@ pub fn dispatch(
 /// Sent once when polling resumes after a gap. The gap itself is the message:
 /// nothing in this program can reconstruct which warnings were live while it
 /// was not looking, so the user has to be told the window existed.
-pub fn send_gap_recovery(gap_secs: u64, scripts: &Scripts) -> Result<()> {
+pub fn send_gap_recovery(gap_secs: u64, levels: &NotifyLevels, scripts: &Scripts) -> Result<()> {
     let minutes = gap_secs / 60;
     let n = Notification {
         key: "weatui.feed.recovered".to_string(),
@@ -194,11 +194,7 @@ pub fn send_gap_recovery(gap_secs: u64, scripts: &Scripts) -> Result<()> {
         damage_threat: None,
         tornado_detection: None,
     };
-    let notified = run(&build_args(
-        "[weatui] ALERT FEED RESUMED",
-        &body_for(&n, None),
-        Urgency::Critical,
-    ));
+    let notified = desktop_or_skip(levels, "[weatui] ALERT FEED RESUMED", &body_for(&n, None));
     let scripted = match scripts.for_tier(ThreatTier::Lethal) {
         Some(script) => run_script(script, &n, None),
         None => Ok(()),
@@ -208,6 +204,17 @@ pub fn send_gap_recovery(gap_secs: u64, scripts: &Scripts) -> Result<()> {
         (Err(a), Err(b)) => Err(anyhow::anyhow!("{a:#}; {b:#}")),
         (Err(e), Ok(())) | (Ok(()), Err(e)) => Err(e),
     }
+}
+
+/// System notices are pinned to critical rather than following a tier, but
+/// they must still respect a config that has no desktop daemon at all. On
+/// macOS every tier is silenced and alerts go out through scripts, so calling
+/// `notify-send` here would fail on every single staleness notice.
+fn desktop_or_skip(levels: &NotifyLevels, summary: &str, body: &str) -> Result<()> {
+    if !levels.uses_desktop_daemon() {
+        return Ok(());
+    }
+    run(&build_args(summary, body, Urgency::Critical))
 }
 
 pub fn stale_notification(elapsed_secs: u64) -> Notification {
@@ -233,13 +240,13 @@ pub fn stale_notification(elapsed_secs: u64) -> Notification {
 /// documented `notify = "none"` plus `[alerts.scripts]` setup would otherwise
 /// get no staleness signal at all, because the one message meaning "this system
 /// is broken" would go solely to the channel the user turned off.
-pub fn send_stale_warning(elapsed_secs: u64, scripts: &Scripts) -> Result<()> {
+pub fn send_stale_warning(
+    elapsed_secs: u64,
+    levels: &NotifyLevels,
+    scripts: &Scripts,
+) -> Result<()> {
     let n = stale_notification(elapsed_secs);
-    let notified = run(&build_args(
-        "[weatui] ALERT FEED STALE",
-        &body_for(&n, None),
-        Urgency::Critical,
-    ));
+    let notified = desktop_or_skip(levels, "[weatui] ALERT FEED STALE", &body_for(&n, None));
     let scripted = match scripts.for_tier(ThreatTier::Lethal) {
         Some(script) => run_script(script, &n, None),
         None => Ok(()),
@@ -376,7 +383,13 @@ mod tests {
             severe: None,
             watch: None,
         };
-        let _ = send_stale_warning(420, &scripts);
+        let silent = NotifyLevels {
+            lethal: Urgency::None,
+            severe: Urgency::None,
+            watch: Urgency::None,
+        };
+        send_stale_warning(420, &silent, &scripts)
+            .expect("a script-only setup must not report failure just because notify-send is absent");
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         while !out.exists() && std::time::Instant::now() < deadline {

@@ -69,7 +69,9 @@ async fn main() -> Result<()> {
     let cfg = config::Config::load()?;
     let home = resolve_home(&cfg)?;
 
-    if let Err(e) = notify::preflight() {
+    if cfg.alerts.notify.uses_desktop_daemon()
+        && let Err(e) = notify::preflight()
+    {
         eprintln!("weatui: {e:#}");
     }
 
