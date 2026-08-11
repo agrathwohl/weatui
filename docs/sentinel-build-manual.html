@@ -1,0 +1,2029 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sentinel One: Prototype Build Manual</title>
+<style>
+  :root {
+    --ground: #F4F6F5;
+    --surface: #FFFFFF;
+    --surface-2: #EAEEEC;
+    --line: #D2DAD8;
+    --line-soft: #E3E9E7;
+    --ink: #1B2427;
+    --ink-2: #47555A;
+    --ink-3: #74858A;
+    --accent: #17796C;
+    --accent-soft: #E0F0ED;
+    --lethal: #C62828;
+    --severe: #A96500;
+    --watch: #1C6FA8;
+    --lethal-bg: #FBE9E9;
+    --severe-bg: #FCF1DF;
+    --watch-bg: #E6F1F9;
+    --code-bg: #10181C;
+    --code-ink: #C8D6D3;
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground: #0B1014;
+      --surface: #131B21;
+      --surface-2: #18232A;
+      --line: #2A3941;
+      --line-soft: #1E2A31;
+      --ink: #DDE7E6;
+      --ink-2: #A3B3B5;
+      --ink-3: #74868A;
+      --accent: #42B8A6;
+      --accent-soft: #12302D;
+      --lethal: #FF6B6B;
+      --severe: #FFB020;
+      --watch: #78C8FF;
+      --lethal-bg: #2A1416;
+      --severe-bg: #2A2011;
+      --watch-bg: #12222E;
+      --code-bg: #080D10;
+      --code-ink: #C8D6D3;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0B1014; --surface: #131B21; --surface-2: #18232A;
+    --line: #2A3941; --line-soft: #1E2A31;
+    --ink: #DDE7E6; --ink-2: #A3B3B5; --ink-3: #74868A;
+    --accent: #42B8A6; --accent-soft: #12302D;
+    --lethal: #FF6B6B; --severe: #FFB020; --watch: #78C8FF;
+    --lethal-bg: #2A1416; --severe-bg: #2A2011; --watch-bg: #12222E;
+    --code-bg: #080D10; --code-ink: #C8D6D3;
+  }
+  :root[data-theme="light"] {
+    --ground: #F4F6F5; --surface: #FFFFFF; --surface-2: #EAEEEC;
+    --line: #D2DAD8; --line-soft: #E3E9E7;
+    --ink: #1B2427; --ink-2: #47555A; --ink-3: #74858A;
+    --accent: #17796C; --accent-soft: #E0F0ED;
+    --lethal: #C62828; --severe: #A96500; --watch: #1C6FA8;
+    --lethal-bg: #FBE9E9; --severe-bg: #FCF1DF; --watch-bg: #E6F1F9;
+    --code-bg: #10181C; --code-ink: #C8D6D3;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--ground); color: var(--ink);
+    font-family: var(--sans); font-size: 16px; line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { display: grid; grid-template-columns: 1fr; max-width: 1400px; margin: 0 auto; }
+  @media (min-width: 1080px) {
+    .wrap { grid-template-columns: 250px minmax(0, 1fr); gap: 56px; padding-right: 40px; }
+  }
+
+  /* ---------- rail ---------- */
+  .rail { display: none; }
+  @media (min-width: 1080px) {
+    .rail {
+      display: block; position: sticky; top: 0; align-self: start;
+      height: 100vh; overflow-y: auto; padding: 40px 0 40px 32px;
+      border-right: 1px solid var(--line-soft);
+    }
+  }
+  .rail-title {
+    font-family: var(--mono); font-size: 0.6875rem; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--ink-3); margin-bottom: 18px;
+  }
+  .rail ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+  .rail a {
+    display: flex; gap: 10px; padding: 5px 0; font-size: 0.8125rem;
+    color: var(--ink-2); text-decoration: none; line-height: 1.4;
+  }
+  .rail a:hover { color: var(--accent); }
+  .rail a .n { font-family: var(--mono); color: var(--ink-3); font-size: 0.75rem; flex-shrink: 0; }
+  .rail .sep { height: 1px; background: var(--line-soft); margin: 12px 0; }
+
+  /* ---------- content ---------- */
+  main { padding: 40px 20px 120px; min-width: 0; }
+  @media (min-width: 1080px) { main { padding: 56px 0 160px; } }
+  .col { max-width: 72ch; }
+  .wide { max-width: 100%; }
+
+  h1 {
+    font-size: clamp(2rem, 5vw, 2.875rem); line-height: 1.08; letter-spacing: -0.02em;
+    margin: 0 0 10px; text-wrap: balance; font-weight: 700;
+  }
+  h2 {
+    font-size: 1.5rem; line-height: 1.2; letter-spacing: -0.01em; margin: 0 0 6px;
+    text-wrap: balance; font-weight: 650;
+  }
+  h3 {
+    font-size: 1.0625rem; margin: 32px 0 8px; font-weight: 650; letter-spacing: -0.005em;
+  }
+  h4 {
+    font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--ink-3); margin: 26px 0 8px; font-weight: 600;
+  }
+  p { margin: 0 0 14px; }
+  a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px;
+      text-decoration-thickness: 1px; text-decoration-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+  a:hover { text-decoration-color: var(--accent); }
+  a:focus-visible, .rail a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+  ul, ol { margin: 0 0 14px; padding-left: 22px; }
+  li { margin-bottom: 6px; }
+  strong { font-weight: 650; color: var(--ink); }
+  code {
+    font-family: var(--mono); font-size: 0.855em; background: var(--surface-2);
+    border: 1px solid var(--line-soft); padding: 1px 5px; border-radius: 3px;
+  }
+  hr { border: 0; border-top: 1px solid var(--line-soft); margin: 0; }
+
+  /* ---------- masthead ---------- */
+  .mast { border-bottom: 2px solid var(--ink); padding-bottom: 28px; margin-bottom: 8px; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 0.6875rem; letter-spacing: 0.16em;
+    text-transform: uppercase; color: var(--accent); margin-bottom: 14px;
+  }
+  .dek { font-size: 1.125rem; color: var(--ink-2); max-width: 60ch; margin: 0 0 20px; }
+  .meta-strip {
+    display: flex; flex-wrap: wrap; gap: 0 28px; font-family: var(--mono);
+    font-size: 0.75rem; color: var(--ink-3);
+  }
+  .meta-strip b { color: var(--ink-2); font-weight: 500; }
+
+  /* ---------- stage ---------- */
+  section { padding-top: 52px; scroll-margin-top: 20px; }
+  .stage-head { display: flex; gap: 18px; align-items: baseline; margin-bottom: 18px; }
+  .stage-num {
+    font-family: var(--mono); font-size: 0.75rem; font-weight: 600; letter-spacing: 0.08em;
+    color: var(--ground); background: var(--ink); padding: 3px 9px; border-radius: 3px;
+    flex-shrink: 0; position: relative; top: -3px;
+  }
+  .stage-num.opt { background: var(--ink-3); }
+
+  /* ---------- callouts ---------- */
+  .note {
+    border-left: 3px solid var(--accent); background: var(--accent-soft);
+    padding: 14px 18px; margin: 0 0 18px; border-radius: 0 4px 4px 0;
+  }
+  .note p:last-child, .warn p:last-child, .prove p:last-child { margin-bottom: 0; }
+  .note .lbl, .warn .lbl {
+    font-family: var(--mono); font-size: 0.6875rem; letter-spacing: 0.12em;
+    text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;
+  }
+  .note .lbl { color: var(--accent); }
+  .warn { border-left: 3px solid var(--lethal); background: var(--lethal-bg);
+          padding: 14px 18px; margin: 0 0 18px; border-radius: 0 4px 4px 0; }
+  .warn .lbl { color: var(--lethal); }
+  .warn.amber { border-left-color: var(--severe); background: var(--severe-bg); }
+  .warn.amber .lbl { color: var(--severe); }
+
+  .prove {
+    border: 1px solid var(--accent); border-left-width: 3px;
+    background: var(--surface); padding: 16px 18px; margin: 22px 0 0; border-radius: 0 4px 4px 0;
+  }
+  .prove .lbl {
+    font-family: var(--mono); font-size: 0.6875rem; letter-spacing: 0.14em;
+    text-transform: uppercase; font-weight: 700; color: var(--accent);
+    display: flex; align-items: center; gap: 8px; margin-bottom: 9px;
+  }
+  .prove .lbl::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  .prove ol { margin-bottom: 0; }
+
+  /* ---------- code ---------- */
+  pre {
+    background: var(--code-bg); color: var(--code-ink); padding: 16px 18px;
+    border-radius: 5px; overflow-x: auto; margin: 0 0 18px;
+    font-family: var(--mono); font-size: 0.8125rem; line-height: 1.6;
+    border: 1px solid var(--line-soft);
+  }
+  pre code { background: none; border: 0; padding: 0; font-size: inherit; color: inherit; }
+  .filename {
+    font-family: var(--mono); font-size: 0.6875rem; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--ink-3); margin-bottom: 6px; display: flex; align-items: center; gap: 8px;
+  }
+  .filename::before { content: ""; width: 8px; height: 8px; border: 1px solid var(--ink-3); border-radius: 1px; }
+
+  /* ---------- tables ---------- */
+  .tbl-scroll { overflow-x: auto; margin: 0 0 18px; border: 1px solid var(--line); border-radius: 5px; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.875rem; background: var(--surface); }
+  th {
+    text-align: left; font-family: var(--mono); font-size: 0.6875rem; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--ink-3); font-weight: 600;
+    padding: 10px 14px; border-bottom: 1px solid var(--line); white-space: nowrap;
+    background: var(--surface-2);
+  }
+  td { padding: 10px 14px; border-bottom: 1px solid var(--line-soft); vertical-align: top; color: var(--ink-2); }
+  tr:last-child td { border-bottom: 0; }
+  td strong { color: var(--ink); }
+  .num { font-variant-numeric: tabular-nums; font-family: var(--mono); white-space: nowrap; }
+  tfoot td { font-weight: 650; color: var(--ink); background: var(--surface-2); border-top: 1px solid var(--line); }
+
+  .pill {
+    display: inline-block; font-family: var(--mono); font-size: 0.6875rem; font-weight: 600;
+    letter-spacing: 0.06em; padding: 2px 7px; border-radius: 3px; white-space: nowrap;
+  }
+  .pill.lethal { color: var(--lethal); background: var(--lethal-bg); border: 1px solid color-mix(in srgb, var(--lethal) 30%, transparent); }
+  .pill.severe { color: var(--severe); background: var(--severe-bg); border: 1px solid color-mix(in srgb, var(--severe) 30%, transparent); }
+  .pill.watch  { color: var(--watch);  background: var(--watch-bg);  border: 1px solid color-mix(in srgb, var(--watch) 30%, transparent); }
+  .pill.core   { color: var(--accent); background: var(--accent-soft); border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); }
+  .pill.opt    { color: var(--ink-3);  background: var(--surface-2);   border: 1px solid var(--line); }
+
+  /* ---------- figures ---------- */
+  figure { margin: 24px 0; }
+  .fig-box {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 5px;
+    padding: 22px 18px; overflow-x: auto;
+  }
+  .fig-box svg { display: block; margin: 0 auto; min-width: 480px; }
+  figcaption {
+    font-family: var(--mono); font-size: 0.6875rem; letter-spacing: 0.08em; color: var(--ink-3);
+    margin-top: 9px; line-height: 1.5;
+  }
+  figcaption b { color: var(--ink-2); font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; }
+
+  .svg-fill-s   { fill: var(--surface-2); }
+  .svg-fill-g   { fill: var(--ground); }
+  .svg-stroke   { stroke: var(--line); fill: none; }
+  .svg-stroke-2 { stroke: var(--ink-3); fill: none; }
+  .svg-label    { fill: var(--ink); font-family: var(--mono); font-size: 11px; font-weight: 600; }
+  .svg-sub      { fill: var(--ink-3); font-family: var(--mono); font-size: 9px; }
+  .svg-accent-f { fill: var(--accent); }
+  .svg-accent-s { stroke: var(--accent); fill: none; }
+  .svg-lethal-s { stroke: var(--lethal); fill: none; }
+  .svg-lethal-f { fill: var(--lethal); }
+
+  .grid2 { display: grid; grid-template-columns: 1fr; gap: 18px; margin-bottom: 18px; }
+  @media (min-width: 720px) { .grid2 { grid-template-columns: 1fr 1fr; } }
+  .card {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 5px; padding: 16px 18px;
+  }
+  .card h5 {
+    margin: 0 0 8px; font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--ink); font-weight: 650;
+  }
+  .card p, .card ul { font-size: 0.875rem; color: var(--ink-2); }
+  .card :last-child { margin-bottom: 0; }
+
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; font-size: 0.875rem; margin-bottom: 18px; }
+  .kv dt { font-family: var(--mono); font-size: 0.75rem; color: var(--ink-3); }
+  .kv dd { margin: 0; color: var(--ink-2); }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+
+<nav class="rail">
+  <div class="rail-title">Contents</div>
+  <ol>
+    <li><a href="#scope"><span class="n">00</span><span>Scope and limits</span></a></li>
+    <li><a href="#arch"><span class="n">01</span><span>Architecture</span></a></li>
+    <li><a href="#bom"><span class="n">02</span><span>Bill of materials</span></a></li>
+    <div class="sep"></div>
+    <li><a href="#s1"><span class="n">S1</span><span>Software spine</span></a></li>
+    <li><a href="#s2"><span class="n">S2</span><span>The annunciator</span></a></li>
+    <li><a href="#s3"><span class="n">S3</span><span>Power and ride-through</span></a></li>
+    <li><a href="#s4"><span class="n">S4</span><span>Radio receiver</span></a></li>
+    <li><a href="#s5"><span class="n">S5</span><span>Independence (MCU)</span></a></li>
+    <li><a href="#s6"><span class="n">S6</span><span>Local sensors</span></a></li>
+    <li><a href="#s7"><span class="n">S7</span><span>Siren listener</span></a></li>
+    <div class="sep"></div>
+    <li><a href="#selftest"><span class="n">03</span><span>Self-test regime</span></a></li>
+    <li><a href="#testing"><span class="n">04</span><span>Testing without a storm</span></a></li>
+    <li><a href="#failure"><span class="n">05</span><span>Failure modes</span></a></li>
+    <li><a href="#place"><span class="n">06</span><span>Placement</span></a></li>
+    <li><a href="#legal"><span class="n">07</span><span>Legal and safety</span></a></li>
+  </ol>
+</nav>
+
+<main>
+
+<header class="mast col">
+  <div class="eyebrow">Prototype Build Manual &middot; Revision A &middot; One Unit</div>
+  <h1>Sentinel One</h1>
+  <p class="dek">A single-unit severe weather annunciator you can build on a bench and live with in your own house. Radar-derived storm tracking on top of an independent radio warning receiver that keeps working when the internet, the power, and the computer all fail.</p>
+  <div class="meta-strip">
+    <span><b>Build time</b> 6&ndash;10 h across stages</span>
+    <span><b>Cost</b> $180&ndash;$520</span>
+    <span><b>Soldering</b> minimal, through-hole</span>
+    <span><b>Region</b> United States only</span>
+  </div>
+</header>
+
+<section id="scope">
+  <div class="stage-head"><span class="stage-num">00</span><h2>Scope and limits</h2></div>
+  <div class="col">
+    <p>Read this section before spending money. It determines whether you should build any of this.</p>
+
+    <h4>The gap this fills</h4>
+    <p>Outdoor warning sirens are not designed to be audible indoors, and the National Weather Service says so plainly. Phone alerts fail when the phone is silenced, dead, or the cell network is congested. The gap is a sleeping household at 2am with no dependable indoor annunciation. That is the problem this solves, and every decision below serves it.</p>
+
+    <h4>What this is not</h4>
+    <div class="warn">
+      <span class="lbl">Do not rely on this alone</span>
+      <p>This is an uncertified prototype. It does not replace a NOAA Weather Radio, and it does not predict tornadoes. The radar cell tracking is decision support layered on top of official warnings. <code>weatui</code>'s own source says it correctly: <em>&ldquo;Warnings remain the authority.&rdquo;</em> Keep a commercial <a href="https://www.weather.gov/nwr/">NWR Public Alert receiver</a> in the house regardless of what you build here.</p>
+    </div>
+
+    <p>An honest comparison, because it should inform how much you spend:</p>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>Capability</th><th>$30 weather radio</th><th>Sentinel One</th></tr></thead>
+        <tbody>
+          <tr><td><strong>SAME warnings for your county</strong></td><td>Yes</td><td>Yes</td></tr>
+          <tr><td><strong>Works with no internet</strong></td><td>Yes</td><td>Yes (stage 4+)</td></tr>
+          <tr><td><strong>Battery ride-through</strong></td><td>Hours (AA)</td><td>24 h full, weeks degraded</td></tr>
+          <tr><td>Storm cell tracking and ETA to your address</td><td>No</td><td>Yes</td></tr>
+          <tr><td>Radar loop and forecast</td><td>No</td><td>Yes</td></tr>
+          <tr><td>Detects its own failure and tells you</td><td>No</td><td>Yes</td></tr>
+          <tr><td>Bed shaker / strobe for hard-of-hearing</td><td>Some models</td><td>Yes</td></tr>
+          <tr><td>Certified to CTA-2009 Public Alert</td><td>Yes</td><td><strong>No</strong></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>The first three rows are the life-safety core, and a cheap radio already covers them. Everything you gain here sits in rows four through seven. Build this if you want those rows. Not because the radio falls short.</p>
+
+    <h4>Prerequisites</h4>
+    <ul>
+      <li>You live in the United States and are within range of an <a href="https://www.weather.gov/nwr/station_listing">NWR transmitter</a>.</li>
+      <li>You can use a terminal, edit a TOML file, and follow a wiring diagram.</li>
+      <li>You have <code>weatui</code> building from source (<code>cargo build --release</code>).</li>
+    </ul>
+  </div>
+</section>
+
+<hr>
+
+<section id="arch">
+  <div class="stage-head"><span class="stage-num">01</span><h2>Architecture</h2></div>
+  <div class="col">
+    <p>The central design rule: <strong>the life-safety path does not run on the computer.</strong> A Linux box with a filesystem, a network stack, and a pre-release radar crate in it is a fine place for radar imagery and storm tracking. It is a poor place to put the only thing standing between a sleeping family and a tornado.</p>
+    <p>So the build splits in two. A small microcontroller owns the radio receiver, the siren, and the battery, running bare metal with no filesystem and no network. The Raspberry Pi runs <code>weatui</code> and everything clever. The Pi <em>may request</em> an alarm. The Pi <em>cannot suppress</em> one.</p>
+    <p>Kernel panic, corrupted SD card, failed update, out-of-memory, an attacker on your LAN, an expired TLS certificate, NOAA renaming an S3 bucket: none of it can stop the siren. The complicated thing fails, the simple thing wakes you up.</p>
+  </div>
+
+  <figure class="wide">
+    <div class="fig-box">
+      <svg viewBox="0 0 860 430" width="860" height="430" role="img" aria-label="System block diagram showing the independent safety path on a microcontroller and the enhancement path on a Raspberry Pi">
+        <!-- Tier labels -->
+        <text x="12" y="26" class="svg-sub">TIER 1: SURVIVES GRID + INTERNET LOSS</text>
+        <rect x="8" y="34" width="392" height="238" rx="4" class="svg-fill-g svg-accent-s" stroke-dasharray="3 3"/>
+
+        <text x="452" y="26" class="svg-sub">TIER 3: REQUIRES INTERNET</text>
+        <rect x="448" y="34" width="404" height="238" rx="4" class="svg-fill-g svg-stroke" stroke-dasharray="3 3"/>
+
+        <!-- RF sources -->
+        <rect x="26" y="52" width="150" height="46" rx="3" class="svg-fill-s svg-stroke"/>
+        <text x="38" y="72" class="svg-label">NWR SAME</text>
+        <text x="38" y="87" class="svg-sub">162.400&ndash;162.550 MHz</text>
+
+        <rect x="26" y="110" width="150" height="42" rx="3" class="svg-fill-s svg-stroke"/>
+        <text x="38" y="129" class="svg-label">AS3935</text>
+        <text x="38" y="143" class="svg-sub">lightning, local</text>
+
+        <rect x="26" y="164" width="150" height="42" rx="3" class="svg-fill-s svg-stroke"/>
+        <text x="38" y="183" class="svg-label">BME280 / GPS</text>
+        <text x="38" y="197" class="svg-sub">pressure, time, fix</text>
+
+        <!-- MCU -->
+        <rect x="216" y="52" width="168" height="154" rx="3" class="svg-fill-s svg-accent-s" stroke-width="2"/>
+        <text x="230" y="74" class="svg-label">SAFETY MCU</text>
+        <text x="230" y="90" class="svg-sub">RP2350 &middot; bare metal</text>
+        <text x="230" y="112" class="svg-sub">&bull; SAME decode</text>
+        <text x="230" y="128" class="svg-sub">&bull; siren + strobe</text>
+        <text x="230" y="144" class="svg-sub">&bull; battery mgmt</text>
+        <text x="230" y="160" class="svg-sub">&bull; button, watchdog</text>
+        <text x="230" y="184" class="svg-sub">no FS &middot; no network</text>
+
+        <line x1="176" y1="75" x2="216" y2="90" class="svg-accent-s" stroke-width="1.5"/>
+        <line x1="176" y1="131" x2="216" y2="120" class="svg-stroke-2"/>
+        <line x1="176" y1="185" x2="216" y2="150" class="svg-stroke-2"/>
+
+        <!-- Internet sources -->
+        <rect x="466" y="52" width="164" height="42" rx="3" class="svg-fill-s svg-stroke"/>
+        <text x="478" y="71" class="svg-label">NWS CAP</text>
+        <text x="478" y="85" class="svg-sub">api.weather.gov</text>
+
+        <rect x="466" y="104" width="164" height="42" rx="3" class="svg-fill-s svg-stroke"/>
+        <text x="478" y="123" class="svg-label">NEXRAD L2</text>
+        <text x="478" y="137" class="svg-sub">AWS S3, ~4.5 min</text>
+
+        <rect x="466" y="156" width="164" height="42" rx="3" class="svg-fill-s svg-stroke"/>
+        <text x="478" y="175" class="svg-label">HRRR</text>
+        <text x="478" y="189" class="svg-sub">forecast, optional</text>
+
+        <!-- Pi -->
+        <rect x="666" y="52" width="170" height="146" rx="3" class="svg-fill-s svg-stroke" stroke-width="2"/>
+        <text x="680" y="74" class="svg-label">RASPBERRY PI 5</text>
+        <text x="680" y="90" class="svg-sub">Linux &middot; weatui -d</text>
+        <text x="680" y="112" class="svg-sub">&bull; alert poll + VTEC</text>
+        <text x="680" y="128" class="svg-sub">&bull; cell scan + track</text>
+        <text x="680" y="144" class="svg-sub">&bull; approach ETA</text>
+        <text x="680" y="160" class="svg-sub">&bull; radar display</text>
+
+        <line x1="630" y1="73" x2="666" y2="100" class="svg-stroke-2"/>
+        <line x1="630" y1="125" x2="666" y2="120" class="svg-stroke-2"/>
+        <line x1="630" y1="177" x2="666" y2="140" class="svg-stroke-2"/>
+
+        <!-- UART link -->
+        <path d="M666 175 L 520 175 L 520 232 L 384 232" class="svg-accent-s" stroke-width="1.5" marker-end="url(#arw)"/>
+        <rect x="470" y="216" width="130" height="32" rx="3" class="svg-fill-g svg-accent-s"/>
+        <text x="482" y="230" class="svg-sub" style="fill:var(--accent)">UART 115200</text>
+        <text x="482" y="242" class="svg-sub" style="fill:var(--accent)">REQUEST ONLY</text>
+
+        <!-- Outputs -->
+        <text x="12" y="308" class="svg-sub">ANNUNCIATION: DRIVEN BY MCU ALONE</text>
+        <rect x="8" y="316" width="844" height="98" rx="4" class="svg-fill-g svg-lethal-s" stroke-dasharray="3 3"/>
+
+        <rect x="30" y="336" width="180" height="60" rx="3" class="svg-fill-s svg-lethal-s" stroke-width="2"/>
+        <text x="44" y="358" class="svg-label" style="fill:var(--lethal)">PIEZO SIREN</text>
+        <text x="44" y="374" class="svg-sub">100&ndash;110 dB @ 1 m</text>
+        <text x="44" y="388" class="svg-sub">current-sensed</text>
+
+        <rect x="230" y="336" width="170" height="60" rx="3" class="svg-fill-s svg-stroke"/>
+        <text x="244" y="358" class="svg-label">LED STROBE</text>
+        <text x="244" y="374" class="svg-sub">deaf / HoH</text>
+
+        <rect x="420" y="336" width="170" height="60" rx="3" class="svg-fill-s svg-stroke"/>
+        <text x="434" y="358" class="svg-label">BED SHAKER</text>
+        <text x="434" y="374" class="svg-sub">12 V, under mattress</text>
+
+        <rect x="610" y="336" width="222" height="60" rx="3" class="svg-fill-s svg-stroke"/>
+        <text x="624" y="358" class="svg-label">ACK BUTTON</text>
+        <text x="624" y="374" class="svg-sub">silences 10 min,</text>
+        <text x="624" y="388" class="svg-sub">then re-arms automatically</text>
+
+        <line x1="300" y1="206" x2="300" y2="336" class="svg-lethal-s" stroke-width="2" marker-end="url(#arwr)"/>
+
+        <defs>
+          <marker id="arw" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto">
+            <path d="M0,0 L6,3 L0,6 z" class="svg-accent-f"/>
+          </marker>
+          <marker id="arwr" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto">
+            <path d="M0,0 L6,3 L0,6 z" class="svg-lethal-f"/>
+          </marker>
+        </defs>
+      </svg>
+    </div>
+    <figcaption><b>Fig. 1.</b> System block diagram. The teal boundary marks everything that keeps working with no grid and no internet. The Pi reaches the annunciator only through a request channel it cannot use to silence anything.</figcaption>
+  </figure>
+
+  <div class="col">
+    <h3>Build in stages, each one useful on its own</h3>
+    <p>Do not attempt the whole thing in a weekend. Every stage below ends in a working, testable state, and you should live with each one for a few days before going further. Stages 1 through 3 give you a useful device. Stages 4 and 5 are what make it trustworthy.</p>
+  </div>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>Stage</th><th>Adds</th><th>Survives</th><th>Time</th><th>Cost</th></tr></thead>
+      <tbody>
+        <tr><td><span class="pill core">S1</span> <strong>Software spine</strong></td><td>Pi running <code>weatui -d</code>, alerts to console</td><td>Nothing extra</td><td class="num">1&ndash;2 h</td><td class="num">$95&ndash;175</td></tr>
+        <tr><td><span class="pill core">S2</span> <strong>Annunciator</strong></td><td>Siren, strobe, ack button on GPIO</td><td>You being asleep</td><td class="num">1&ndash;2 h</td><td class="num">$25&ndash;45</td></tr>
+        <tr><td><span class="pill core">S3</span> <strong>Power</strong></td><td>LiFePO4 ride-through</td><td>Grid loss</td><td class="num">1&ndash;2 h</td><td class="num">$60&ndash;130</td></tr>
+        <tr><td><span class="pill core">S4</span> <strong>Radio</strong></td><td>RTL-SDR receiving NWR SAME</td><td>Internet loss</td><td class="num">2&ndash;3 h</td><td class="num">$45&ndash;70</td></tr>
+        <tr><td><span class="pill opt">S5</span> <strong>Independence</strong></td><td>RP2350 owns siren + radio</td><td>Linux failing entirely</td><td class="num">3&ndash;5 h</td><td class="num">$10&ndash;20</td></tr>
+        <tr><td><span class="pill opt">S6</span> <strong>Sensors</strong></td><td>Lightning, pressure, GPS time</td><td>All feeds down</td><td class="num">1&ndash;2 h</td><td class="num">$35&ndash;60</td></tr>
+        <tr><td><span class="pill opt">S7</span> <strong>Siren listener</strong></td><td>Hears the outdoor warning siren</td><td>Cross-checks everything else</td><td class="num">3&ndash;6 h</td><td class="num">$10&ndash;25</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<hr>
+
+<section id="bom">
+  <div class="stage-head"><span class="stage-num">02</span><h2>Bill of materials</h2></div>
+  <div class="col">
+    <div class="note">
+      <span class="lbl">On these links</span>
+      <p>Product URLs and prices drift, and some parts get discontinued. The <strong>Spec</strong> column is what actually matters. Match the spec, buy from whoever has stock. Where a specific SKU is called out, an equivalent is nearly always fine.</p>
+    </div>
+  </div>
+
+  <h4>Stage 1: compute</h4>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>Item</th><th>Spec that matters</th><th>Suggested</th><th>Cost</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Single board computer</strong></td>
+          <td>4 GB RAM minimum; 8 GB if you want HRRR forecast decoding. Pi 4 works but struggles on GRIB2.</td>
+          <td><a href="https://www.raspberrypi.com/products/raspberry-pi-5/">Raspberry Pi 5, 4 GB</a></td>
+          <td class="num">$60</td>
+        </tr>
+        <tr>
+          <td><strong>Cooling</strong></td>
+          <td>Passive or active. Must be fanless long-term; fans clog and die. Start with the active cooler, plan a heatsink case.</td>
+          <td><a href="https://www.raspberrypi.com/products/active-cooler/">Pi 5 Active Cooler</a></td>
+          <td class="num">$5</td>
+        </tr>
+        <tr>
+          <td><strong>Boot storage</strong></td>
+          <td><strong>Not a microSD card.</strong> SD wear is the number one field failure for always-on Pis. NVMe or eMMC.</td>
+          <td><a href="https://shop.pimoroni.com/products/nvme-base">Pimoroni NVMe Base</a> + 256 GB NVMe</td>
+          <td class="num">$15 + $25</td>
+        </tr>
+        <tr>
+          <td><strong>Power supply</strong></td>
+          <td>5 V 5 A USB-C PD for Pi 5. Undervolting causes bizarre intermittent faults.</td>
+          <td><a href="https://www.raspberrypi.com/products/27w-power-supply/">Official 27 W USB-C</a></td>
+          <td class="num">$12</td>
+        </tr>
+        <tr>
+          <td>Real-time clock cell</td>
+          <td>Pi 5 has an RTC connector. Correct time is load-bearing: VTEC and CAP expiry logic depends on it.</td>
+          <td>Pi 5 RTC battery (ML2020)</td>
+          <td class="num">$5</td>
+        </tr>
+      </tbody>
+      <tfoot><tr><td colspan="3">Stage 1 subtotal</td><td class="num">$122</td></tr></tfoot>
+    </table>
+  </div>
+
+  <h4>Stage 2: annunciation</h4>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>Item</th><th>Spec that matters</th><th>Suggested</th><th>Cost</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Piezo siren</strong></td>
+          <td>12 V DC, 100&ndash;110 dB at 1 m, under 200 mA. Louder than you think you want. You are trying to wake someone through a closed door.</td>
+          <td><a href="https://www.adafruit.com/product/1733">Adafruit 1733</a> (3&ndash;24 V, ~95 dB) or a 12 V security siren</td>
+          <td class="num">$8&ndash;15</td>
+        </tr>
+        <tr>
+          <td><strong>Low-side switch</strong></td>
+          <td>Logic-level N-channel MOSFET (gate fully on at 3.3 V), 60 V / 5 A+, plus a flyback diode. A relay module also works and is easier, but clicks and wears out.</td>
+          <td>IRLZ44N or IRL540N + 1N4007</td>
+          <td class="num">$3</td>
+        </tr>
+        <tr>
+          <td><strong>LED strobe</strong></td>
+          <td>12 V, high intensity. Not decorative. This is the alert channel for anyone hard of hearing.</td>
+          <td>12 V LED beacon / strobe module</td>
+          <td class="num">$9</td>
+        </tr>
+        <tr>
+          <td>Bed shaker</td>
+          <td>12 V vibration motor rated for under-mattress use. What deaf and HoH users actually rely on.</td>
+          <td>Alarm-clock bed shaker, 12 V</td>
+          <td class="num">$15</td>
+        </tr>
+        <tr>
+          <td><strong>Acknowledge button</strong></td>
+          <td>Momentary, panel mount, 16 mm, ideally illuminated. Must be findable in the dark.</td>
+          <td>16 mm momentary push button</td>
+          <td class="num">$5</td>
+        </tr>
+        <tr>
+          <td>Resistors, wire, perfboard</td>
+          <td>10 k&Omega; gate pulldown, 220 &Omega; gate series, hookup wire, screw terminals.</td>
+          <td>Generic</td>
+          <td class="num">$8</td>
+        </tr>
+      </tbody>
+      <tfoot><tr><td colspan="3">Stage 2 subtotal</td><td class="num">$48&ndash;55</td></tr></tfoot>
+    </table>
+  </div>
+
+  <h4>Stage 3: power</h4>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>Item</th><th>Spec that matters</th><th>Suggested</th><th>Cost</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Battery</strong></td>
+          <td><strong>LiFePO4, not lithium-ion.</strong> No thermal runaway, 2000+ cycles, tolerates the temperature swings of a garage or closet. 12.8 V, 12&ndash;20 Ah, integrated BMS.</td>
+          <td>12.8 V 12 Ah LiFePO4 with BMS</td>
+          <td class="num">$55&ndash;90</td>
+        </tr>
+        <tr>
+          <td><strong>Charger</strong></td>
+          <td>LiFePO4-specific, 14.6 V absorption. A lead-acid charger will slowly destroy the pack.</td>
+          <td>14.6 V 2 A LiFePO4 charger</td>
+          <td class="num">$18</td>
+        </tr>
+        <tr>
+          <td><strong>Buck converter</strong></td>
+          <td>12 V in, 5 V 5 A out, for the Pi. Look for one with real capacitors, not the $2 unmarked kind.</td>
+          <td>12&nbsp;V&rarr;5&nbsp;V 5 A buck, USB-C out</td>
+          <td class="num">$12</td>
+        </tr>
+        <tr>
+          <td>Current/voltage monitor</td>
+          <td>I2C, so the software can detect a grid loss and shed load. Also enables the monthly battery load test.</td>
+          <td><a href="https://www.adafruit.com/product/904">INA219</a> or INA226 breakout</td>
+          <td class="num">$10</td>
+        </tr>
+        <tr>
+          <td>Fuse and holder</td>
+          <td>Inline, 5 A, as close to the battery terminal as physically possible. Non-negotiable on any lithium pack.</td>
+          <td>ATO blade fuse holder</td>
+          <td class="num">$5</td>
+        </tr>
+      </tbody>
+      <tfoot><tr><td colspan="3">Stage 3 subtotal</td><td class="num">$100&ndash;135</td></tr></tfoot>
+    </table>
+  </div>
+
+  <h4>Stage 4: radio</h4>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>Item</th><th>Spec that matters</th><th>Suggested</th><th>Cost</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>SDR receiver</strong></td>
+          <td>Must cover 162 MHz with a stable TCXO. The cheap unmarked dongles drift badly with temperature and will lose lock overnight.</td>
+          <td><a href="https://www.rtl-sdr.com/buy-rtl-sdr-dvb-t-dongles/">RTL-SDR Blog V4</a> (1 PPM TCXO)</td>
+          <td class="num">$40</td>
+        </tr>
+        <tr>
+          <td><strong>Antenna</strong></td>
+          <td>Tuned for 162 MHz. A quarter wave is about 46 cm; the dipole kit's telescopic legs adjust to it. This is the single most common reason a weather radio "does not work."</td>
+          <td>RTL-SDR Blog dipole kit, legs at ~46 cm</td>
+          <td class="num">included</td>
+        </tr>
+        <tr>
+          <td>Outdoor/attic antenna</td>
+          <td>Only if you are in a basement, a shelter, or a marginal signal area. 162 MHz ground plane plus coax.</td>
+          <td>VHF ground plane + RG-6</td>
+          <td class="num">$25&ndash;45</td>
+        </tr>
+        <tr>
+          <td>Dedicated SAME receiver chip</td>
+          <td>Optional alternative to the SDR for the always-on low-power path. The Si4707 decodes SAME in hardware at a fraction of the power. Breakout availability has become poor; check stock before planning around it.</td>
+          <td>Si4707 breakout, if you can find one</td>
+          <td class="num">$15&ndash;35</td>
+        </tr>
+      </tbody>
+      <tfoot><tr><td colspan="3">Stage 4 subtotal</td><td class="num">$40&ndash;85</td></tr></tfoot>
+    </table>
+  </div>
+
+  <h4>Stages 5 to 7: independence, sensors, siren listener</h4>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>Item</th><th>Spec that matters</th><th>Suggested</th><th>Cost</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Safety MCU</strong></td>
+          <td>Any MCU with two UARTs, an ADC, a hardware watchdog, and enough GPIO. Cheap and replaceable is the point.</td>
+          <td><a href="https://www.raspberrypi.com/products/raspberry-pi-pico-2/">Raspberry Pi Pico 2</a></td>
+          <td class="num">$5</td>
+        </tr>
+        <tr>
+          <td>Lightning detector</td>
+          <td>AS3935 with I2C or SPI. Local storm proximity with no external dependency. Needs care with placement away from switching noise.</td>
+          <td><a href="https://www.sparkfun.com/products/15441">SparkFun AS3935</a> or DFRobot equivalent</td>
+          <td class="num">$25</td>
+        </tr>
+        <tr>
+          <td>Barometric pressure</td>
+          <td>I2C, 1 Pa resolution. A rapid pressure fall is real, local, dependency-free signal.</td>
+          <td><a href="https://www.adafruit.com/product/2652">Adafruit BME280</a></td>
+          <td class="num">$15</td>
+        </tr>
+        <tr>
+          <td>GPS module</td>
+          <td>Internet-free time discipline plus automatic home coordinates. Solves clock drift during long outages.</td>
+          <td><a href="https://www.adafruit.com/product/746">Adafruit Ultimate GPS</a> or u-blox NEO-M8N</td>
+          <td class="num">$15&ndash;30</td>
+        </tr>
+        <tr>
+          <td><strong>Outdoor microphone</strong></td>
+          <td>I2S MEMS, flat to at least 4 kHz, 60 dB+ SNR. Digital output matters: an analogue mic on a long run into a switching-noise-rich box will pick up more hash than siren.</td>
+          <td><a href="https://www.adafruit.com/product/3421">Adafruit SPH0645 I2S</a> or ICS-43434 module</td>
+          <td class="num">$7</td>
+        </tr>
+        <tr>
+          <td>Mic weatherproofing</td>
+          <td>Foam windscreen plus a downward-facing vented housing. Wind noise sits right on top of the siren band and will swamp everything without it.</td>
+          <td>Foam screen + PVC elbow, or a proper outdoor mic housing</td>
+          <td class="num">$8&ndash;18</td>
+        </tr>
+        <tr>
+          <td>Enclosure</td>
+          <td>ABS or polycarbonate, IP54 if it lives in a garage or shelter. Room for the battery. Ventilated but not fan-cooled.</td>
+          <td>Hammond 1554 series or similar</td>
+          <td class="num">$25&ndash;45</td>
+        </tr>
+      </tbody>
+      <tfoot><tr><td colspan="3">Stages 5&ndash;7 subtotal</td><td class="num">$100&ndash;155</td></tr></tfoot>
+    </table>
+  </div>
+
+  <div class="col">
+    <dl class="kv">
+      <dt>MINIMUM</dt><dd>Stages 1&ndash;2 only, reusing a Pi you own: <strong>about $50</strong></dd>
+      <dt>RECOMMENDED</dt><dd>Stages 1&ndash;4, the point at which it survives grid and internet loss: <strong>about $310</strong></dd>
+      <dt>COMPLETE</dt><dd>All seven stages with enclosure: <strong>about $545</strong></dd>
+    </dl>
+  </div>
+</section>
+
+<hr>
+
+<section id="s1">
+  <div class="stage-head"><span class="stage-num">S1</span><h2>Software spine</h2></div>
+  <div class="col">
+    <p><strong>Objective:</strong> a Pi that boots unattended, runs <code>weatui</code> in daemon mode, and executes a script of your choosing the instant a warning lands for your location. No hardware yet. Everything downstream hangs off this hook.</p>
+
+    <h3>1.1 Operating system</h3>
+    <p>Raspberry Pi OS Lite (64-bit) is the pragmatic choice for a prototype. Flash with <a href="https://www.raspberrypi.com/software/">Raspberry Pi Imager</a>, and in the imager's advanced options set the hostname, enable SSH with a public key, and configure Wi-Fi. Do not enable password SSH.</p>
+    <p>If you intend to take this further than a prototype, NixOS is the better answer, and your repo already carries a <code>flake.nix</code>. Declarative config, atomic generations, and rollback-on-failed-boot are exactly what an unattended safety appliance needs. That is a larger detour than a first build justifies.</p>
+
+    <pre><code># after first boot
+sudo apt update &amp;&amp; sudo apt full-upgrade -y
+sudo apt install -y build-essential pkg-config libssl-dev git
+
+# rust, if not building elsewhere and copying the binary over
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh</code></pre>
+
+    <h3>1.2 Build and install</h3>
+    <pre><code>git clone &lt;your weatui remote&gt; ~/weatui &amp;&amp; cd ~/weatui
+cargo build --release
+
+sudo install -m 0755 target/release/weatui /usr/local/bin/weatui
+sudo useradd --system --home /var/lib/weatui --create-home weatui
+sudo install -d -o weatui -g weatui /var/lib/weatui/.config/weatui</code></pre>
+
+    <div class="note">
+      <span class="lbl">Cross-compiling</span>
+      <p>Building on the Pi itself takes a while. If you have a faster machine, <a href="https://github.com/cross-rs/cross"><code>cross</code></a> targeting <code>aarch64-unknown-linux-gnu</code> and copying the binary over is considerably less painful.</p>
+    </div>
+
+    <h3>1.3 Configuration</h3>
+    <p>Two settings do the heavy lifting here. Setting every tier under <code>[alerts.notify]</code> to <code>"none"</code> disables desktop notifications entirely, which is the supported headless path and skips the notification daemon preflight. Pointing every tier under <code>[alerts.scripts]</code> at one script routes all annunciation through hardware.</p>
+
+    <div class="filename">/var/lib/weatui/.config/weatui/config.toml</div>
+    <pre><code>[location]
+# Use explicit coordinates, not zip. A zip resolves to a centroid that
+# may be kilometres from where you actually sleep, and every distance,
+# bearing and approach ETA is measured from this point.
+lat = 35.2226
+lon = -97.4395
+
+[radar]
+site = "auto"          # nearest WSR-88D, or an ICAO id like "KTLX"
+frames = 12            # history depth for the loop and the tracker
+refresh_secs = 120     # polling floor is 30s; volumes arrive every ~4.5 min
+
+[alerts]
+poll_interval_secs = 30
+stale_after_secs = 600 # a dead feed is announced after 10 minutes
+
+[alerts.notify]
+# No desktop daemon on a headless appliance. Hardware does the alerting.
+lethal = "none"
+severe = "none"
+watch  = "none"
+
+[alerts.scripts]
+# Absolute paths are required and validated at load. One script handles
+# all three tiers and branches on $1.
+lethal = "/usr/local/lib/weatui/annunciate.sh"
+severe = "/usr/local/lib/weatui/annunciate.sh"
+watch  = "/usr/local/lib/weatui/annunciate.sh"
+
+[render]
+ring_km = [8.0, 25.0, 50.0]</code></pre>
+
+    <h3>1.4 The script contract</h3>
+    <p>This is the integration surface for every piece of hardware in this manual, so here it is exactly. <code>weatui</code> spawns your script detached, with stdin, stdout and stderr all pointed at <code>/dev/null</code>, and reaps it on a background thread so a slow script cannot block the alert loop.</p>
+
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>Passed as</th><th>Name</th><th>Contents</th></tr></thead>
+        <tbody>
+          <tr><td class="num">$1</td><td><code>tier</code></td><td><span class="pill lethal">LETHAL</span> <span class="pill severe">SEVERE</span> <span class="pill watch">WATCH</span></td></tr>
+          <tr><td class="num">$2</td><td><code>event</code></td><td>e.g. <code>Tornado Warning</code></td></tr>
+          <tr><td class="num">env</td><td><code>WEATUI_TIER</code></td><td>Same as <code>$1</code></td></tr>
+          <tr><td class="num">env</td><td><code>WEATUI_EVENT</code></td><td>Same as <code>$2</code></td></tr>
+          <tr><td class="num">env</td><td><code>WEATUI_HEADLINE</code></td><td>NWS headline text, may be empty</td></tr>
+          <tr><td class="num">env</td><td><code>WEATUI_AREA</code></td><td>Affected area description, may be empty</td></tr>
+          <tr><td class="num">env</td><td><code>WEATUI_ETA_MINUTES</code></td><td>Minutes until arrival, empty when unknown</td></tr>
+          <tr><td class="num">env</td><td><code>WEATUI_DAMAGE_THREAT</code></td><td><code>CONSIDERABLE</code>, <code>CATASTROPHIC</code>, or empty</td></tr>
+          <tr><td class="num">env</td><td><code>WEATUI_TORNADO_DETECTION</code></td><td><code>RADAR INDICATED</code>, <code>OBSERVED</code>, or empty</td></tr>
+          <tr><td class="num">env</td><td><code>WEATUI_INSTRUCTION</code></td><td>NWS protective action text</td></tr>
+          <tr><td class="num">env</td><td><code>WEATUI_URL</code></td><td>Link to the hazard page for your coordinates</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note">
+      <span class="lbl">One behaviour to plan for</span>
+      <p><code>send_gap_recovery</code> fires the <strong>LETHAL</strong> script hook when the alert feed resumes after an outage, regardless of the configured tier levels, because a dead poller is indistinguishable from calm weather. Your siren will sound when the feed comes back. That is correct and deliberate: you were unprotected during the gap and need to know. Handle <code>ALERT FEED RESUMED</code> as a distinct event in your script so it gets its own tone rather than the tornado pattern.</p>
+    </div>
+
+    <p>A placeholder script for this stage, replaced with the real one in stage 2:</p>
+    <div class="filename">/usr/local/lib/weatui/annunciate.sh</div>
+    <pre><code>#!/bin/sh
+# Stage 1: log only. Stage 2 replaces this with hardware annunciation.
+set -eu
+logger -t weatui-alert "TIER=$1 EVENT=$2 ETA=${WEATUI_ETA_MINUTES:-?} \
+DAMAGE=${WEATUI_DAMAGE_THREAT:-none} DETECT=${WEATUI_TORNADO_DETECTION:-none}"</code></pre>
+    <pre><code>sudo install -d /usr/local/lib/weatui
+sudo install -m 0755 annunciate.sh /usr/local/lib/weatui/annunciate.sh</code></pre>
+
+    <h3>1.5 Service unit</h3>
+    <p>One subtlety matters here. <code>WatchdogSec</code> only helps if the keepalive comes from the code path that matters. A heartbeat on a timer will happily keep a process alive that stopped fetching alerts an hour ago. If you wire up <code>sd_notify</code>, ping it from the alert loop.</p>
+
+    <div class="filename">/etc/systemd/system/weatui.service</div>
+    <pre><code>[Unit]
+Description=weatui severe weather annunciator
+After=network-online.target time-sync.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=weatui
+Group=weatui
+Environment=HOME=/var/lib/weatui
+ExecStart=/usr/local/bin/weatui -d
+Restart=always
+RestartSec=5
+
+# The alert script needs GPIO. Everything else is locked down.
+SupplementaryGroups=gpio dialout
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/weatui
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target</code></pre>
+
+    <pre><code>sudo systemctl daemon-reload
+sudo systemctl enable --now weatui
+systemctl status weatui
+journalctl -u weatui -f</code></pre>
+
+    <div class="warn amber">
+      <span class="lbl">The script hook is a privilege surface</span>
+      <p><code>weatui</code> already rejects relative script paths at config load, which is the right guard. Add the rest yourself: the script and its directory must be root-owned and not writable by the <code>weatui</code> user. <code>sudo chown -R root:root /usr/local/lib/weatui &amp;&amp; sudo chmod -R go-w /usr/local/lib/weatui</code>. Anyone who can rewrite that file gets code execution as your alert daemon.</p>
+    </div>
+
+    <div class="prove">
+      <div class="lbl">Prove it</div>
+      <ol>
+        <li><code>systemctl is-active weatui</code> returns <code>active</code>.</li>
+        <li>Run the script by hand and confirm it logs: <code>sudo WEATUI_ETA_MINUTES=7 /usr/local/lib/weatui/annunciate.sh LETHAL "Tornado Warning"</code>, then <code>journalctl -t weatui-alert -n 5</code>.</li>
+        <li>Kill the process (<code>sudo systemctl kill -s SIGKILL weatui</code>) and confirm systemd restarts it within about 5 seconds.</li>
+        <li>Reboot. Confirm the service comes back with no login.</li>
+        <li>Leave it running for 48 hours. Check <code>journalctl -u weatui --since "2 days ago" | grep -i error</code> before moving on.</li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<hr>
+
+<section id="s2">
+  <div class="stage-head"><span class="stage-num">S2</span><h2>The annunciator</h2></div>
+  <div class="col">
+    <p><strong>Objective:</strong> physical noise and light loud enough to wake a sleeping adult through a closed bedroom door, driven from the script hook you just proved.</p>
+    <p>This is the stage that turns a monitoring tool into a safety device. Give it more care than the radar.</p>
+  </div>
+
+  <figure class="wide">
+    <div class="fig-box">
+      <svg viewBox="0 0 800 340" width="800" height="340" role="img" aria-label="Wiring schematic showing Raspberry Pi GPIO driving a MOSFET low-side switch for a 12 volt siren with flyback diode">
+        <!-- Pi -->
+        <rect x="20" y="60" width="150" height="200" rx="4" class="svg-fill-s svg-stroke" stroke-width="2"/>
+        <text x="34" y="84" class="svg-label">RASPBERRY PI</text>
+        <text x="34" y="100" class="svg-sub">40-pin header</text>
+        <line x1="20" y1="112" x2="170" y2="112" class="svg-stroke"/>
+        <text x="34" y="134" class="svg-sub">GPIO17 &nbsp;pin 11</text>
+        <text x="34" y="156" class="svg-sub">GPIO27 &nbsp;pin 13</text>
+        <text x="34" y="178" class="svg-sub">GPIO22 &nbsp;pin 15</text>
+        <text x="34" y="200" class="svg-sub">GPIO23 &nbsp;pin 16</text>
+        <text x="34" y="230" class="svg-sub">GND &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;pin 6</text>
+
+        <circle cx="170" cy="130" r="3" class="svg-accent-f"/>
+        <circle cx="170" cy="226" r="3" class="svg-fill-g svg-stroke-2" stroke-width="1.5"/>
+
+        <!-- gate resistor -->
+        <line x1="170" y1="130" x2="235" y2="130" class="svg-accent-s" stroke-width="1.5"/>
+        <rect x="235" y="122" width="34" height="16" rx="2" class="svg-fill-g svg-stroke-2"/>
+        <text x="238" y="118" class="svg-sub">220R</text>
+        <line x1="269" y1="130" x2="330" y2="130" class="svg-accent-s" stroke-width="1.5"/>
+
+        <!-- pulldown -->
+        <line x1="300" y1="130" x2="300" y2="196" class="svg-stroke-2"/>
+        <rect x="292" y="152" width="16" height="32" rx="2" class="svg-fill-g svg-stroke-2"/>
+        <text x="312" y="172" class="svg-sub">10k</text>
+        <line x1="240" y1="196" x2="470" y2="196" class="svg-stroke-2"/>
+
+        <!-- MOSFET -->
+        <line x1="330" y1="104" x2="330" y2="156" class="svg-stroke-2" stroke-width="2"/>
+        <line x1="330" y1="112" x2="352" y2="112" class="svg-stroke-2" stroke-width="2"/>
+        <line x1="330" y1="130" x2="352" y2="130" class="svg-stroke-2" stroke-width="2"/>
+        <line x1="330" y1="148" x2="352" y2="148" class="svg-stroke-2" stroke-width="2"/>
+        <line x1="352" y1="112" x2="352" y2="86" class="svg-stroke-2" stroke-width="2"/>
+        <line x1="352" y1="148" x2="352" y2="196" class="svg-stroke-2" stroke-width="2"/>
+        <text x="362" y="140" class="svg-label">IRLZ44N</text>
+        <text x="362" y="154" class="svg-sub">logic-level</text>
+        <text x="306" y="96" class="svg-sub">G</text>
+        <text x="360" y="82" class="svg-sub">D</text>
+        <text x="360" y="192" class="svg-sub">S</text>
+
+        <!-- siren -->
+        <line x1="352" y1="86" x2="470" y2="86" class="svg-stroke-2" stroke-width="2"/>
+        <rect x="470" y="60" width="130" height="52" rx="3" class="svg-fill-s svg-lethal-s" stroke-width="2"/>
+        <text x="484" y="82" class="svg-label" style="fill:var(--lethal)">SIREN 12 V</text>
+        <text x="484" y="98" class="svg-sub">100&ndash;110 dB</text>
+
+        <!-- flyback -->
+        <path d="M420 86 L 420 46 L 540 46 L 540 60" class="svg-stroke-2" stroke-dasharray="4 3"/>
+        <path d="M448 40 L 462 46 L 448 52 Z" class="svg-fill-g svg-stroke-2"/>
+        <line x1="462" y1="38" x2="462" y2="54" class="svg-stroke-2" stroke-width="1.5"/>
+        <text x="470" y="36" class="svg-sub">1N4007 flyback (required)</text>
+
+        <!-- 12v rail -->
+        <line x1="600" y1="86" x2="700" y2="86" class="svg-stroke-2" stroke-width="2"/>
+        <line x1="700" y1="86" x2="700" y2="196" class="svg-stroke-2" stroke-width="2"/>
+        <text x="646" y="78" class="svg-sub">+12 V</text>
+
+        <!-- gnd bus -->
+        <line x1="170" y1="226" x2="700" y2="226" class="svg-stroke-2" stroke-width="2"/>
+        <line x1="470" y1="196" x2="470" y2="226" class="svg-stroke-2"/>
+        <text x="500" y="244" class="svg-sub">COMMON GROUND: Pi ground and 12 V ground MUST be bonded</text>
+
+        <!-- fuse -->
+        <rect x="686" y="130" width="28" height="20" rx="2" class="svg-fill-g svg-stroke-2"/>
+        <text x="722" y="145" class="svg-sub">5 A fuse</text>
+
+        <!-- button -->
+        <rect x="470" y="272" width="180" height="46" rx="3" class="svg-fill-s svg-stroke"/>
+        <text x="484" y="292" class="svg-label">ACK BUTTON</text>
+        <text x="484" y="307" class="svg-sub">GPIO23 &rarr; GND, internal pull-up</text>
+        <line x1="170" y1="200" x2="300" y2="200" class="svg-accent-s" stroke-dasharray="3 3"/>
+        <path d="M300 200 L 300 295 L 470 295" class="svg-accent-s" stroke-dasharray="3 3"/>
+      </svg>
+    </div>
+    <figcaption><b>Fig. 2.</b> Low-side switch. The MOSFET sinks siren current to ground; the Pi's 3.3 V logic never touches the 12 V rail. The flyback diode is not optional: an inductive load switching off will otherwise put a destructive spike across the drain.</figcaption>
+  </figure>
+
+  <div class="col">
+    <h3>2.1 GPIO assignment</h3>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>Signal</th><th>GPIO</th><th>Header pin</th><th>Direction</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Siren</strong></td><td class="num">17</td><td class="num">11</td><td>Out</td><td>Through 220 &Omega; to MOSFET gate, 10 k&Omega; gate-to-ground</td></tr>
+          <tr><td><strong>Strobe</strong></td><td class="num">27</td><td class="num">13</td><td>Out</td><td>Second MOSFET, identical circuit</td></tr>
+          <tr><td>Bed shaker</td><td class="num">22</td><td class="num">15</td><td>Out</td><td>Third MOSFET</td></tr>
+          <tr><td><strong>Ack button</strong></td><td class="num">23</td><td class="num">16</td><td>In</td><td>To ground, internal pull-up enabled</td></tr>
+          <tr><td>Ground</td><td></td><td class="num">6</td><td></td><td>Bond to 12 V supply ground</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="warn">
+      <span class="lbl">Two ways to destroy a Pi here</span>
+      <p><strong>Never</strong> connect 12 V to a GPIO pin. The Pi's GPIO is 3.3 V tolerant and will die instantly, possibly taking the SoC with it. <strong>Always</strong> bond the 12 V supply ground to Pi ground; without a common return path the MOSFET gate has no reference and behaves unpredictably. Bench-test the switch with the siren replaced by an LED and series resistor before you connect anything at 12 V.</p>
+    </div>
+
+    <h3>2.2 The annunciation script</h3>
+    <p>The gate-drive tooling on Pi OS shifted between releases. Confirm what you have before writing the script:</p>
+    <pre><code>gpiodetect              # lists chips; note the label for the 40-pin header
+gpioinfo | head -30     # confirms line numbering
+pinctrl get 17          # the Pi-specific alternative, from raspi-utils</code></pre>
+    <p>On Pi 5 the header is exposed through the RP1, and the chip label has moved between kernel versions. The script below reads the chip from a variable so you can correct it once rather than in six places.</p>
+
+    <div class="filename">/usr/local/lib/weatui/annunciate.sh</div>
+    <pre><code>#!/bin/bash
+# Hardware annunciation for weatui alert tiers.
+#   $1 = LETHAL | SEVERE | WATCH        $2 = event name
+set -euo pipefail
+
+CHIP="${WEATUI_GPIOCHIP:-gpiochip0}"   # verify with: gpiodetect
+SIREN=17
+STROBE=27
+SHAKER=22
+STATE_DIR=/run/weatui
+mkdir -p "$STATE_DIR"
+
+on()  { gpioset -t0 "$CHIP" "$1"=1; }
+off() { gpioset -t0 "$CHIP" "$1"=0; }
+
+# Silence window honoured by the ack button handler, but capped: a user who
+# hits mute and falls back asleep must not stay unprotected.
+if [ -f "$STATE_DIR/silenced_until" ] &&
+   [ "$(date +%s)" -lt "$(cat "$STATE_DIR/silenced_until")" ]; then
+  logger -t weatui-alert "suppressed during ack window: $1 $2"
+  exit 0
+fi
+
+pattern() {  # $1 on-ms  $2 off-ms  $3 repeats
+  local i
+  for ((i=0; i<$3; i++)); do
+    on  $SIREN; on  $STROBE; on  $SHAKER
+    sleep "$(echo "scale=3; $1/1000" | bc)"
+    off $SIREN; off $STROBE; off $SHAKER
+    sleep "$(echo "scale=3; $2/1000" | bc)"
+  done
+}
+
+logger -t weatui-alert "TIER=$1 EVENT=$2 ETA=${WEATUI_ETA_MINUTES:-?}"
+
+# The feed-recovery notification arrives on the LETHAL hook by design.
+# Give it its own signature so it is not mistaken for a tornado.
+if [ "${2}" = "ALERT FEED RESUMED" ]; then
+  pattern 120 380 4
+  exit 0
+fi
+
+case "$1" in
+  LETHAL)
+    # Continuous, 3 minutes, unmistakable. Escalate further if the NWS
+    # tagged it as a confirmed tornado rather than radar-indicated.
+    if [ "${WEATUI_TORNADO_DETECTION:-}" = "OBSERVED" ] ||
+       [ "${WEATUI_DAMAGE_THREAT:-}" = "CATASTROPHIC" ]; then
+      pattern 1500 200 72
+    else
+      pattern 900 300 45
+    fi
+    ;;
+  SEVERE) pattern 400 600 20 ;;
+  WATCH)  pattern 200 800 3  ;;
+esac</code></pre>
+
+    <h3>2.3 Acknowledge button</h3>
+    <p>The button must silence the current alert and then re-arm on its own. A safety device that can be permanently muted by a half-asleep hand is worse than no device.</p>
+
+    <div class="filename">/usr/local/lib/weatui/ackd.py</div>
+    <pre><code>#!/usr/bin/env python3
+"""Ack button watcher. Silences annunciation for a bounded window only."""
+import time, pathlib, subprocess
+import gpiod                      # python3-libgpiod
+
+SILENCE_SECONDS = 600             # 10 minutes, then it re-arms itself
+STATE = pathlib.Path("/run/weatui/silenced_until")
+CHIP, LINE = "gpiochip0", 23      # verify with gpiodetect
+
+with gpiod.Chip(CHIP) as chip:
+    cfg = {LINE: gpiod.LineSettings(
+        direction=gpiod.line.Direction.INPUT,
+        bias=gpiod.line.Bias.PULL_UP,
+        edge_detection=gpiod.line.Edge.FALLING,
+        debounce_period=time.timedelta(milliseconds=40))}
+    with chip.request_lines(consumer="weatui-ack", config=cfg) as req:
+        while True:
+            if req.wait_edge_events(timeout=None):
+                req.read_edge_events()
+                STATE.parent.mkdir(exist_ok=True)
+                STATE.write_text(str(int(time.time()) + SILENCE_SECONDS))
+                subprocess.run(["pkill", "-f", "annunciate.sh"], check=False)
+                print("silenced for", SILENCE_SECONDS, "s", flush=True)</code></pre>
+
+    <div class="prove">
+      <div class="lbl">Prove it</div>
+      <ol>
+        <li>Bench-test with an LED before connecting 12 V. Confirm the LED follows <code>gpioset</code>.</li>
+        <li>Fire each tier by hand and confirm the pattern differs audibly:<br><code>sudo /usr/local/lib/weatui/annunciate.sh WATCH "Tornado Watch"</code><br><code>sudo /usr/local/lib/weatui/annunciate.sh LETHAL "Tornado Warning"</code></li>
+        <li>Confirm the escalated pattern: <code>sudo WEATUI_TORNADO_DETECTION=OBSERVED /usr/local/lib/weatui/annunciate.sh LETHAL "Tornado Warning"</code></li>
+        <li><strong>Measure it.</strong> Use a phone SPL meter at the far side of a closed bedroom door. You want 75 dB or more at the pillow. If you do not have that, you have a nightlight, not an alarm.</li>
+        <li>Press the ack button mid-alert. Confirm it silences, then confirm it re-arms after 10 minutes.</li>
+        <li>Have someone else trigger it while you are actually asleep. Everything above tests a component. Only this tests whether the device does its job, and it is the one people skip.</li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<hr>
+
+<section id="s3">
+  <div class="stage-head"><span class="stage-num">S3</span><h2>Power and ride-through</h2></div>
+  <div class="col">
+    <p><strong>Objective:</strong> keep working when the grid does not. Severe weather takes out power, frequently minutes before the threat arrives. A weather alarm that dies with the lights is theatre.</p>
+
+    <h3>3.1 Sizing</h3>
+    <p>Measured draw for this build: roughly 8 W sustained with the Pi busy, the SDR running, and the display off. The design target is not "run forever," it is <strong>24 hours of full operation, then weeks of degraded operation.</strong> That split is what makes the battery sizing work. Twenty-four hours covers essentially any storm event; the degraded mode covers the multi-day outage afterward when you still need warnings.</p>
+
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>Mode</th><th>What runs</th><th>Draw</th><th>12.8 V 12 Ah (154 Wh)</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Normal</strong></td><td>Everything, mains present</td><td class="num">~8 W</td><td>charging</td></tr>
+          <tr><td><strong>On battery</strong></td><td>Alerts + SAME, radar and HRRR shed</td><td class="num">~5 W</td><td class="num">~26 h</td></tr>
+          <tr><td><strong>Degraded</strong></td><td>MCU + SAME + siren armed, Pi off</td><td class="num">~0.3 W</td><td class="num">weeks</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <figure class="wide">
+    <div class="fig-box">
+      <svg viewBox="0 0 820 300" width="820" height="300" role="img" aria-label="Power architecture from mains through charger and LiFePO4 battery to the Pi and microcontroller">
+        <rect x="16" y="96" width="112" height="56" rx="3" class="svg-fill-s svg-stroke"/>
+        <text x="30" y="120" class="svg-label">MAINS</text>
+        <text x="30" y="136" class="svg-sub">120 VAC</text>
+
+        <rect x="164" y="96" width="120" height="56" rx="3" class="svg-fill-s svg-stroke"/>
+        <text x="178" y="118" class="svg-label">CHARGER</text>
+        <text x="178" y="132" class="svg-sub">14.6 V 2 A</text>
+        <text x="178" y="146" class="svg-sub">LiFePO4 profile</text>
+
+        <rect x="320" y="86" width="136" height="76" rx="3" class="svg-fill-s svg-accent-s" stroke-width="2"/>
+        <text x="334" y="108" class="svg-label">LiFePO4</text>
+        <text x="334" y="124" class="svg-sub">12.8 V 12 Ah</text>
+        <text x="334" y="138" class="svg-sub">integrated BMS</text>
+        <text x="334" y="152" class="svg-sub">154 Wh</text>
+
+        <!-- fuse -->
+        <rect x="470" y="114" width="30" height="20" rx="2" class="svg-fill-g svg-lethal-s" stroke-width="1.5"/>
+        <text x="464" y="150" class="svg-sub" style="fill:var(--lethal)">5 A fuse</text>
+        <text x="462" y="162" class="svg-sub" style="fill:var(--lethal)">at the terminal</text>
+
+        <rect x="540" y="34" width="130" height="52" rx="3" class="svg-fill-s svg-stroke"/>
+        <text x="554" y="55" class="svg-label">BUCK 5 V 5 A</text>
+        <text x="554" y="70" class="svg-sub">&rarr; Raspberry Pi</text>
+
+        <rect x="540" y="100" width="130" height="48" rx="3" class="svg-fill-s svg-stroke"/>
+        <text x="554" y="120" class="svg-label">12 V DIRECT</text>
+        <text x="554" y="135" class="svg-sub">&rarr; siren, strobe</text>
+
+        <rect x="540" y="162" width="130" height="48" rx="3" class="svg-fill-s svg-accent-s" stroke-width="2"/>
+        <text x="554" y="182" class="svg-label">BUCK 3.3 V</text>
+        <text x="554" y="197" class="svg-sub">&rarr; safety MCU</text>
+
+        <rect x="700" y="100" width="106" height="48" rx="3" class="svg-fill-s svg-stroke"/>
+        <text x="714" y="120" class="svg-label">INA219</text>
+        <text x="714" y="135" class="svg-sub">I2C monitor</text>
+
+        <line x1="128" y1="124" x2="164" y2="124" class="svg-stroke-2" stroke-width="2"/>
+        <line x1="284" y1="124" x2="320" y2="124" class="svg-stroke-2" stroke-width="2"/>
+        <line x1="456" y1="124" x2="470" y2="124" class="svg-stroke-2" stroke-width="2"/>
+        <line x1="500" y1="124" x2="520" y2="124" class="svg-stroke-2" stroke-width="2"/>
+        <path d="M520 124 L 520 60 L 540 60" class="svg-stroke-2" stroke-width="2"/>
+        <line x1="520" y1="124" x2="540" y2="124" class="svg-stroke-2" stroke-width="2"/>
+        <path d="M520 124 L 520 186 L 540 186" class="svg-accent-s" stroke-width="2"/>
+        <line x1="670" y1="124" x2="700" y2="124" class="svg-stroke" stroke-dasharray="3 3"/>
+
+        <text x="16" y="212" class="svg-sub">MAINS PRESENT &rarr; charge + full operation</text>
+        <text x="16" y="232" class="svg-sub" style="fill:var(--accent)">MAINS LOST &rarr; INA219 detects, weatui sheds radar + HRRR, ~26 h remain</text>
+        <text x="16" y="252" class="svg-sub" style="fill:var(--lethal)">BATTERY LOW &rarr; Pi shuts down cleanly, MCU + SAME + siren stay armed for weeks</text>
+
+        <rect x="8" y="196" width="804" height="72" rx="4" class="svg-stroke" stroke-dasharray="3 3"/>
+      </svg>
+    </div>
+    <figcaption><b>Fig. 3.</b> Power architecture. The battery is always in circuit and the load runs from it continuously, so there is no changeover event and no transfer gap. The charger simply keeps it topped up.</figcaption>
+  </figure>
+
+  <div class="col">
+    <div class="warn">
+      <span class="lbl">Lithium safety, not boilerplate</span>
+      <p>Use <strong>LiFePO4</strong>, not lithium-ion. It does not go into thermal runaway, it survives 2000+ cycles, and it tolerates the temperature range of a garage or a closet. This device may sit somewhere that hits 60&nbsp;&deg;C.</p>
+      <p>Fuse at the battery terminal, not downstream. An unfused lithium pack can deliver hundreds of amps into a shorted wire and will set your wall on fire. Buy a pack with an integrated BMS; do not assemble raw cells for this.</p>
+      <p>Do not build mains-voltage circuits. Use a sealed, listed wall adapter for the charger and keep everything you construct on the DC side.</p>
+    </div>
+
+    <h3>3.2 Load shedding</h3>
+    <p>When mains drops, stop doing expensive things. Radar volumes are 10&ndash;20 MB every few minutes and HRRR GRIB2 decoding is the heaviest workload in the program; both are also the least life-safety-relevant. Your internet is probably down anyway.</p>
+
+    <div class="filename">/usr/local/lib/weatui/powerwatch.sh</div>
+    <pre><code>#!/bin/bash
+# Swap to a battery config when mains drops. Requires two config files.
+set -euo pipefail
+CFG=/var/lib/weatui/.config/weatui/config.toml
+while true; do
+  # INA219 bus voltage: above ~13.2 V means the charger is supplying.
+  V=$(python3 /usr/local/lib/weatui/read_ina219.py)
+  if (( $(echo "$V < 13.0" | bc -l) )); then
+    if [ ! -f /run/weatui/on_battery ]; then
+      touch /run/weatui/on_battery
+      logger -t weatui-power "mains lost at ${V}V, shedding radar"
+      install -m 0644 -o weatui "${CFG}.battery" "$CFG"
+      systemctl restart weatui
+    fi
+  elif [ -f /run/weatui/on_battery ]; then
+    rm -f /run/weatui/on_battery
+    logger -t weatui-power "mains restored at ${V}V"
+    install -m 0644 -o weatui "${CFG}.mains" "$CFG"
+    systemctl restart weatui
+  fi
+  sleep 30
+done</code></pre>
+    <p>The battery variant raises <code>refresh_secs</code> sharply and drops <code>frames</code>, which cuts both network and CPU load:</p>
+    <pre><code>[radar]
+site = "auto"
+frames = 4
+refresh_secs = 900     # radar every 15 min instead of every 2</code></pre>
+
+    <div class="prove">
+      <div class="lbl">Prove it</div>
+      <ol>
+        <li>Pull the mains plug with the system running. Confirm <strong>zero</strong> interruption: no reboot, no dropped SSH session.</li>
+        <li>Confirm the shed fires: <code>journalctl -t weatui-power -f</code> should log "mains lost" within 30 seconds.</li>
+        <li>Trigger an alert while on battery and confirm the siren still reaches full volume. A brownout under siren load is a common failure.</li>
+        <li><strong>Run it flat once.</strong> Unplug and let it drain, logging voltage. You need to know the real runtime, not the calculated one. Do this before you trust it, then recharge.</li>
+        <li>Note the date on the pack. Schedule a load test every 6 months and plan to replace it around year 5.</li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<hr>
+
+<section id="s4">
+  <div class="stage-head"><span class="stage-num">S4</span><h2>Radio receiver</h2></div>
+  <div class="col">
+    <p><strong>Objective:</strong> receive official NWS warnings with no internet at all. This is the stage that makes the device meaningfully more reliable than a laptop with a browser tab open.</p>
+    <p>NOAA Weather Radio broadcasts from roughly 1000 transmitters on seven VHF channels, carrying SAME digital headers that encode the event type and the specific counties affected. It does not care whether your ISP is up, and the transmitters have their own backup power.</p>
+
+    <h3>4.1 Find your station and county code</h3>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>Channel</th><th>Frequency</th><th>Channel</th><th>Frequency</th></tr></thead>
+        <tbody>
+          <tr><td>WX2</td><td class="num">162.400 MHz</td><td>WX5</td><td class="num">162.475 MHz</td></tr>
+          <tr><td>WX4</td><td class="num">162.425 MHz</td><td>WX3</td><td class="num">162.500 MHz</td></tr>
+          <tr><td>WX5</td><td class="num">162.450 MHz</td><td>WX6</td><td class="num">162.525 MHz</td></tr>
+          <tr><td>WX1</td><td class="num">162.550 MHz</td><td></td><td></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <ul>
+      <li>Find your transmitter and its frequency: <a href="https://www.weather.gov/nwr/station_listing">weather.gov/nwr/station_listing</a></li>
+      <li>Find your six-digit SAME county code: <a href="https://www.weather.gov/nwr/counties">weather.gov/nwr/counties</a>. Record it now; the decoder filters on it.</li>
+    </ul>
+
+    <h3>4.2 Antenna</h3>
+    <p>Antenna quality is the single most common reason a weather radio appears not to work. A quarter-wave at 162.475 MHz is about 46 cm. If you are using the RTL-SDR dipole kit, set each telescopic leg to that length and orient them <strong>vertically</strong> in a straight line, not as a V; NWR is vertically polarised. Height beats everything else. If you are in a basement or a storm shelter, you need an outdoor or attic antenna and coax, no exceptions.</p>
+
+    <h3>4.3 Decode chain</h3>
+    <pre><code>sudo apt install -y rtl-sdr sox
+rtl_test -t                    # confirm the dongle enumerates
+
+# Listen first. You should hear a synthesised voice reading the forecast.
+rtl_fm -f 162.475M -M fm -s 22050 -g 40 - | play -r 22050 -t raw -e s -b 16 -c 1 -</code></pre>
+    <p>Once you can hear the broadcast cleanly, add SAME decoding. <a href="https://github.com/cbs228/sameold"><code>samedec</code></a> is a Rust implementation and fits this project naturally; <a href="https://github.com/EliasOenal/multimon-ng">multimon-ng</a> is the C alternative.</p>
+    <pre><code>cargo install samedec
+
+rtl_fm -f 162.475M -M fm -s 22050 -g 40 - \
+  | samedec -r 22050 --   /usr/local/lib/weatui/same-handler.sh</code></pre>
+
+    <div class="filename">/usr/local/lib/weatui/same-handler.sh</div>
+    <pre><code>#!/bin/bash
+# Invoked by samedec per message. Filters to our county, then annunciates
+# through the same path weatui uses.
+set -euo pipefail
+MY_FIPS="040109"                 # yours from weather.gov/nwr/counties
+
+case "${SAMEDEC_EVENT_CODE:-}" in
+  TOR|TSW|EQW|FFW|SVR|SMW|SQW) TIER=LETHAL ;;
+  SVA|TOA|FFA|HWW)             TIER=SEVERE ;;
+  RWT|RMT)                     TIER=TEST   ;;
+  *)                           TIER=WATCH  ;;
+esac
+
+# Location filter. Fail open: if the location list is unparseable we would
+# rather sound for a neighbouring county than stay silent.
+if [ -n "${SAMEDEC_LOCATIONS:-}" ] &&
+   ! echo "$SAMEDEC_LOCATIONS" | grep -q "$MY_FIPS"; then
+  logger -t weatui-same "not our county: $SAMEDEC_EVENT_CODE $SAMEDEC_LOCATIONS"
+  exit 0
+fi
+
+if [ "$TIER" = "TEST" ]; then
+  # Weekly test received: the entire RF chain is proven working. Record it.
+  date +%s > /var/lib/weatui/last_rwt
+  logger -t weatui-same "RWT/RMT received, RF chain healthy"
+  exit 0
+fi
+
+logger -t weatui-same "SAME $TIER ${SAMEDEC_EVENT_CODE} ${SAMEDEC_ORIGINATOR:-}"
+exec /usr/local/lib/weatui/annunciate.sh "$TIER" "SAME ${SAMEDEC_EVENT_CODE}"</code></pre>
+
+    <div class="warn">
+      <span class="lbl">SAME over the air is unauthenticated</span>
+      <p>There is no cryptographic signature on a SAME broadcast. Anyone with a transmitter can spoof a tornado warning, and EAS spoofing has happened. Cross-check against the internet CAP feed when it is available, and log any RF alert that has no CAP counterpart. When the internet is down, still sound the alarm: a false positive costs you a bad night, a false negative can cost more than that.</p>
+    </div>
+
+    <h3>4.4 Cross-check service</h3>
+    <div class="filename">/etc/systemd/system/weatui-same.service</div>
+    <pre><code>[Unit]
+Description=NWR SAME receiver
+After=weatui.service
+
+[Service]
+Type=simple
+ExecStart=/bin/sh -c '/usr/bin/rtl_fm -f 162.475M -M fm -s 22050 -g 40 - | \
+  /usr/local/bin/samedec -r 22050 -- /usr/local/lib/weatui/same-handler.sh'
+Restart=always
+RestartSec=10
+User=weatui
+SupplementaryGroups=plugdev gpio
+
+[Install]
+WantedBy=multi-user.target</code></pre>
+
+    <div class="prove">
+      <div class="lbl">Prove it</div>
+      <ol>
+        <li>You can hear the forecast voice cleanly through <code>play</code>, with no heavy static.</li>
+        <li><strong>Wait for the Required Weekly Test.</strong> Most offices transmit it late Wednesday morning; check yours. When <code>journalctl -t weatui-same</code> shows the RWT, your antenna, receiver, decoder, filter, and handler are all proven end to end. It is the highest-value check in this manual and it costs nothing.</li>
+        <li>Confirm the county filter works by checking the log for messages from neighbouring counties that were correctly skipped.</li>
+        <li>Pull the Ethernet cable and confirm SAME alerts still annunciate with no internet.</li>
+        <li>Set a monitor: if no RWT arrives for 8 days, something is broken. Wire that into stage 3's self-test.</li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<hr>
+
+<section id="s5">
+  <div class="stage-head"><span class="stage-num opt">S5</span><h2>Independence</h2></div>
+  <div class="col">
+    <p><strong>Objective:</strong> move the siren, the button, and eventually the radio onto a microcontroller that cannot be taken down by anything happening on the Pi. This is the stage that changes the device's character from "useful gadget" to "thing I would rely on."</p>
+
+    <p>Up to now, every alert path runs through Linux. A filesystem corruption, a kernel panic, an out-of-memory kill, or a botched <code>apt upgrade</code> leaves you with a silent box. The MCU fixes that. It costs $5.</p>
+
+    <h3>5.1 Division of responsibility</h3>
+    <div class="grid2">
+      <div class="card">
+        <h5>MCU owns</h5>
+        <ul>
+          <li>Siren, strobe, shaker outputs</li>
+          <li>Acknowledge button and its timeout</li>
+          <li>Battery voltage monitoring</li>
+          <li>Its own hardware watchdog</li>
+          <li>A liveness timer on the Pi</li>
+          <li>Eventually: SAME decode</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h5>Pi may do</h5>
+        <ul>
+          <li>Request an alarm at a given tier</li>
+          <li>Send a heartbeat every 30 s</li>
+          <li>Report ETA and event text for display</li>
+          <li>Request a self-test</li>
+        </ul>
+        <p style="margin-top:10px"><strong>The Pi cannot cancel an alarm the MCU raised itself.</strong> That asymmetry is the point of the whole stage.</p>
+      </div>
+    </div>
+
+    <h3>5.2 Protocol</h3>
+    <p>Deliberately trivial: line-oriented ASCII over UART at 115200 8N1, one command per line, checksum on the wire. A protocol you can debug with a serial terminal at 3am beats an efficient one.</p>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>Direction</th><th>Line</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td>Pi &rarr; MCU</td><td><code>HB</code></td><td>Heartbeat. Absence for 90 s means the Pi is dead.</td></tr>
+          <tr><td>Pi &rarr; MCU</td><td><code>ALARM LETHAL 7</code></td><td>Raise a lethal alarm, ETA 7 minutes.</td></tr>
+          <tr><td>Pi &rarr; MCU</td><td><code>CLEAR</code></td><td>Clear alarms the Pi itself raised. Ignored for MCU-raised alarms.</td></tr>
+          <tr><td>Pi &rarr; MCU</td><td><code>TEST</code></td><td>Run the audible self-test.</td></tr>
+          <tr><td>MCU &rarr; Pi</td><td><code>STAT armed batt=13.1 ack=0</code></td><td>Status, once per second.</td></tr>
+          <tr><td>MCU &rarr; Pi</td><td><code>EVT SAME TOR 040109</code></td><td>MCU decoded a SAME message itself.</td></tr>
+          <tr><td>MCU &rarr; Pi</td><td><code>EVT PIDEAD</code></td><td>Heartbeat lost. MCU is now sounding on its own.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>5.3 Firmware sketch</h3>
+    <p>Written against the Pico SDK in C, deliberately without an RTOS. No dynamic allocation, no filesystem, one loop.</p>
+    <div class="filename">sentinel-mcu/main.c (excerpt)</div>
+    <pre><code>#include "pico/stdlib.h"
+#include "hardware/watchdog.h"
+
+#define PIN_SIREN   2
+#define PIN_STROBE  3
+#define PIN_ACK     14
+#define HEARTBEAT_TIMEOUT_MS  90000
+#define ACK_SILENCE_MS       600000   /* 10 min, then re-arms */
+
+static uint32_t last_heartbeat, silenced_until;
+static enum { IDLE, PI_ALARM, OWN_ALARM } state = IDLE;
+
+static void outputs(bool on) {
+    gpio_put(PIN_SIREN,  on);
+    gpio_put(PIN_STROBE, on);
+}
+
+int main(void) {
+    stdio_init_all();
+    gpio_init(PIN_SIREN);  gpio_set_dir(PIN_SIREN,  GPIO_OUT);
+    gpio_init(PIN_STROBE); gpio_set_dir(PIN_STROBE, GPIO_OUT);
+    gpio_init(PIN_ACK);    gpio_set_dir(PIN_ACK,    GPIO_IN);
+    gpio_pull_up(PIN_ACK);
+
+    /* If this loop ever stops running, reboot in 8 seconds. */
+    watchdog_enable(8000, 1);
+    last_heartbeat = to_ms_since_boot(get_absolute_time());
+
+    for (;;) {
+        watchdog_update();
+        uint32_t now = to_ms_since_boot(get_absolute_time());
+
+        parse_uart_commands(&state, &last_heartbeat);
+
+        /* The Pi going silent is itself an alert condition. A monitoring
+         * box that stopped monitoring must not fail quietly. */
+        if (now - last_heartbeat > HEARTBEAT_TIMEOUT_MS && state == IDLE) {
+            puts("EVT PIDEAD");
+            chirp_pattern(120, 2000);   /* distinct from any weather alert */
+        }
+
+        if (!gpio_get(PIN_ACK)) silenced_until = now + ACK_SILENCE_MS;
+
+        bool suppressed = now &lt; silenced_until;
+        outputs(state != IDLE &amp;&amp; !suppressed);
+
+        sleep_ms(10);
+    }
+}</code></pre>
+
+    <div class="note">
+      <span class="lbl">Wiring change</span>
+      <p>The siren and strobe MOSFET gates move from Pi GPIO17/27 to Pico GP2/GP3. The circuit in Fig. 2 is otherwise unchanged. Bond Pico ground, Pi ground, and 12 V ground together. Cross-connect Pi UART TX (GPIO14, pin 8) to Pico GP1/RX and Pi RX (GPIO15, pin 10) to Pico GP0/TX, and disable the Linux serial console on that port with <code>raspi-config</code> or it will fight you for the line.</p>
+    </div>
+
+    <div class="prove">
+      <div class="lbl">Prove it</div>
+      <ol>
+        <li>Send <code>ALARM LETHAL 5</code> from a serial terminal. The siren sounds.</li>
+        <li>Send <code>CLEAR</code>. It stops.</li>
+        <li><strong>The critical test:</strong> <code>sudo systemctl stop weatui</code>, wait 90 seconds, and confirm the MCU raises <code>EVT PIDEAD</code> and chirps on its own.</li>
+        <li><strong>The harder test:</strong> pull the Pi's power entirely. The MCU must keep running and stay armed.</li>
+        <li>Raise an alarm on the MCU, then send <code>CLEAR</code> from the Pi. Confirm the alarm <strong>does not stop</strong>. If it does, you have rebuilt the single point of failure you were trying to remove.</li>
+        <li>Hang the firmware deliberately with an infinite loop. Confirm the watchdog reboots it within 8 seconds.</li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<hr>
+
+<section id="s6">
+  <div class="stage-head"><span class="stage-num opt">S6</span><h2>Local sensors</h2></div>
+  <div class="col">
+    <p><strong>Objective:</strong> signal that depends on nothing outside the box. Every other source in this build ultimately comes from someone else's transmitter. These do not.</p>
+
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>Sensor</th><th>Bus</th><th>What it gives you</th><th>Placement note</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>AS3935</strong></td><td>I2C / SPI</td>
+            <td>Lightning strike distance out to about 40 km, with a strike-rate trend. Local convection detection with no feed at all.</td>
+            <td>Sensitive to switching noise. Keep it away from the buck converters and the Pi; a short ribbon to a corner of the enclosure helps. Expect to tune the noise floor register.</td>
+          </tr>
+          <tr>
+            <td><strong>BME280</strong></td><td>I2C</td>
+            <td>Pressure to 1 Pa. A rapid fall is a real, local severe-weather signal, and it costs nothing to log continuously.</td>
+            <td>Needs outside air, or at least not the inside of a warm sealed box. Vent it.</td>
+          </tr>
+          <tr>
+            <td><strong>GPS</strong></td><td>UART</td>
+            <td>Time discipline with no internet, plus automatic home coordinates. Solves clock drift during long outages, which otherwise breaks VTEC and CAP expiry logic.</td>
+            <td>Needs sky view. A window sill works; a basement does not. Feed it to <code>chrony</code> as a refclock.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <pre><code>sudo raspi-config      # Interface Options -> I2C -> enable
+sudo apt install -y i2c-tools python3-smbus chrony gpsd
+i2cdetect -y 1         # BME280 at 0x76/0x77, AS3935 at 0x03</code></pre>
+
+    <div class="note">
+      <span class="lbl">Keep these advisory</span>
+      <p>Do not wire a pressure drop or a lightning count directly to the siren. These are not warning products and they will produce false alarms that erode trust in the device, which is a safety cost. Use them to raise a lower-tier notice, to annotate the display, and above all as a cross-check: lightning close by while every network feed is dead is the state where you should stop trusting silence.</p>
+    </div>
+
+    <div class="prove">
+      <div class="lbl">Prove it</div>
+      <ol>
+        <li><code>i2cdetect -y 1</code> shows every expected address.</li>
+        <li>Pressure readings track a known reference (your local METAR altimeter setting, corrected for elevation) within a couple of hPa.</li>
+        <li><code>chronyc sources</code> shows the GPS refclock and agrees with NTP to within milliseconds.</li>
+        <li>Disconnect the internet for an hour and confirm the clock holds.</li>
+        <li>Wait for a real thunderstorm and compare AS3935 distance estimates against a public lightning map. Expect roughly correct, not precise; retune the noise floor if you get strikes reported on a clear day.</li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<hr>
+
+<section id="s7">
+  <div class="stage-head"><span class="stage-num opt">S7</span><h2>Siren listener</h2></div>
+  <div class="col">
+    <p><strong>Objective:</strong> hear your county's outdoor warning siren and use it to cross-check every other channel. Not to raise the alarm.</p>
+
+    <h3>7.1 Why this is a cross-check and not an alert source</h3>
+    <p>Get this framing right or the whole stage is wasted effort. Outdoor sirens are activated by your county emergency manager, who is acting on the same NWS warning your device already received over SAME and CAP, usually a minute or two earlier. Siren detection is therefore <em>normally redundant and slower</em> than what you have.</p>
+    <p>Its value is entirely in the disagreements:</p>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>Siren</th><th>NWS feed</th><th>What it means</th><th>Action</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Heard</td><td>Active warning</td>
+            <td>Normal. Two independent channels agree.</td>
+            <td>Display corroboration. Nothing else.</td>
+          </tr>
+          <tr>
+            <td><strong>Heard</strong></td><td><strong>Nothing</strong></td>
+            <td><strong>The state this stage exists for.</strong> Either your receive chain is broken, or your county activated on a spotter report or a local policy trigger ahead of any NWS product.</td>
+            <td>Raise a <span class="pill severe">SEVERE</span> notice immediately and run the self-test.</td>
+          </tr>
+          <tr>
+            <td>Not heard</td><td>Active warning</td>
+            <td>Expected most of the time. You are probably out of range, or the storm is louder than the siren.</td>
+            <td>Nothing. Do not treat as a fault.</td>
+          </tr>
+          <tr>
+            <td>Heard</td><td>Alert you suspected was spoofed</td>
+            <td>SAME over the air is unauthenticated. An acoustic siren from the right direction is meaningful independent corroboration.</td>
+            <td>Raise confidence, log it.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>7.2 Emergency vehicles are the easy problem</h3>
+    <p>The concern is reasonable and turns out to be tractable. Tornado activation in most US jurisdictions is a <strong>steady tone held for three minutes</strong>. An emergency vehicle is a frequency sweep that passes by in well under a minute. Those are not close.</p>
+  </div>
+
+  <figure class="wide">
+    <div class="fig-box">
+      <svg viewBox="0 0 800 300" width="800" height="300" role="img" aria-label="Time frequency comparison showing a warning siren as a steady horizontal band versus an emergency vehicle wail as a rapid repeating sweep">
+        <text x="16" y="20" class="svg-sub">FREQ</text>
+        <line x1="60" y1="30" x2="60" y2="150" class="svg-stroke-2"/>
+        <line x1="60" y1="150" x2="770" y2="150" class="svg-stroke-2"/>
+        <text x="20" y="44" class="svg-sub">1.5k</text>
+        <text x="24" y="148" class="svg-sub">400</text>
+
+        <text x="70" y="26" class="svg-label" style="fill:var(--accent)">OUTDOOR WARNING SIREN: steady, 3 minutes</text>
+        <rect x="70" y="96" width="320" height="12" rx="2" class="svg-accent-f" opacity="0.85"/>
+        <rect x="70" y="76" width="320" height="6" rx="2" class="svg-accent-f" opacity="0.4"/>
+        <rect x="70" y="60" width="320" height="4" rx="2" class="svg-accent-f" opacity="0.25"/>
+        <text x="76" y="126" class="svg-sub">fundamental holds &plusmn;2% &middot; harmonic comb above it</text>
+
+        <text x="430" y="26" class="svg-label" style="fill:var(--lethal)">EMERGENCY VEHICLE: wail, ~25 s</text>
+        <path d="M440 140 L 455 62 L 470 140 L 485 62 L 500 140 L 515 62 L 530 140 L 545 62 L 560 140"
+              class="svg-lethal-s" stroke-width="3" opacity="0.85"/>
+        <text x="440" y="126" class="svg-sub">sweeps 500&ndash;1500 Hz every ~4 s</text>
+
+        <!-- envelope row -->
+        <text x="16" y="196" class="svg-sub">LEVEL</text>
+        <line x1="60" y1="186" x2="60" y2="266" class="svg-stroke-2"/>
+        <line x1="60" y1="266" x2="770" y2="266" class="svg-stroke-2"/>
+
+        <path d="M70 250 Q 90 202 110 250 Q 130 202 150 250 Q 170 202 190 250 Q 210 202 230 250
+                 Q 250 202 270 250 Q 290 202 310 250 Q 330 202 350 250 Q 370 202 390 250"
+              class="svg-accent-s" stroke-width="2"/>
+        <text x="76" y="286" class="svg-sub" style="fill:var(--accent)">slow AM from rotation: 3&ndash;6 RPM, 10&ndash;20 s period. Nothing else does this</text>
+
+        <path d="M440 264 Q 500 190 560 264" class="svg-lethal-s" stroke-width="2"/>
+        <text x="440" y="286" class="svg-sub" style="fill:var(--lethal)">single approach-and-pass, plus Doppler shift</text>
+
+        <line x1="390" y1="30" x2="390" y2="266" class="svg-stroke" stroke-dasharray="3 3"/>
+        <text x="600" y="176" class="svg-sub">decision window: 90 s</text>
+        <line x1="70" y1="166" x2="290" y2="166" class="svg-accent-s" stroke-width="2"/>
+        <line x1="70" y1="162" x2="70" y2="170" class="svg-accent-s" stroke-width="2"/>
+        <line x1="290" y1="162" x2="290" y2="170" class="svg-accent-s" stroke-width="2"/>
+      </svg>
+    </div>
+    <figcaption><b>Fig. 5.</b> The two signals differ on every axis that matters. Duration alone resolves nearly all of it; pitch stability and the rotation modulation resolve the rest.</figcaption>
+  </figure>
+
+  <div class="col">
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>Feature</th><th>Warning siren</th><th>Emergency vehicle</th><th>Power</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Duration above threshold</strong></td><td>180 s continuous</td><td>10&ndash;40 s</td><td><span class="pill core">VERY HIGH</span></td></tr>
+          <tr><td><strong>Pitch stability</strong></td><td>Fundamental holds within a few percent</td><td>Sweeps continuously</td><td><span class="pill core">VERY HIGH</span></td></tr>
+          <tr><td>Slow amplitude modulation</td><td>0.05&ndash;0.1 Hz if the siren rotates</td><td>Absent</td><td><span class="pill core">HIGH</span> when present</td></tr>
+          <tr><td>Doppler</td><td>None, the source is bolted to a pole</td><td>Clear shift on the pass</td><td><span class="pill severe">MEDIUM</span></td></tr>
+          <tr><td>Harmonic density</td><td>Dense comb from the mechanical chopper</td><td>Cleaner, electronically generated</td><td><span class="pill severe">MEDIUM</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>7.3 The trick that makes it work</h3>
+    <div class="note">
+      <span class="lbl">Recognise one siren, not all sirens</span>
+      <p>You are not building a general siren classifier. You are matching <strong>one specific siren</strong> on one specific pole at one specific bearing from your house. That is a far easier problem.</p>
+      <p>Better still, most counties test their sirens on a published monthly schedule, commonly the first Wednesday around noon. That hands you a <strong>labelled recording of your own siren every month, for free</strong>, and simultaneously verifies the detector still works. It is the same gift the weekly radio test gives you in stage 4. Capture the first few, build a spectral template from them, and match against that.</p>
+    </div>
+
+    <h3>7.4 The real limitation: range</h3>
+    <div class="warn amber">
+      <span class="lbl">This will often hear nothing, and that is not a fault</span>
+      <p>Outdoor sirens are engineered for roughly a mile of outdoor coverage in still air. During a thunderstorm the ambient noise floor climbs steeply from rain, wind and thunder, and audibility collapses. <strong>The conditions in which you need it are the conditions in which you cannot hear it.</strong></p>
+      <p>If you are more than a mile from the nearest siren, expect this stage to detect the monthly test on a calm day and very little else. That is still useful, because the monthly test is what keeps the detector honest, but do not build this expecting a reliable storm-time channel. Never let "no siren heard" suppress or downgrade anything.</p>
+    </div>
+
+    <h3>7.5 Signal chain</h3>
+    <pre><code>sudo apt install -y python3-numpy python3-scipy
+# I2S mic on the Pi: SPH0645 wiring
+#   3V  -> pin 1      GND -> pin 9
+#   BCLK-> GPIO18 p12 LRCL-> GPIO19 p35   DOUT-> GPIO20 p38
+echo "dtoverlay=googlevoicehat-soundcard" | sudo tee -a /boot/firmware/config.txt
+sudo reboot
+arecord -l                       # confirm the capture device appears
+arecord -D plughw:1 -c1 -r 16000 -f S32_LE -t wav -d 10 test.wav</code></pre>
+
+    <div class="filename">/usr/local/lib/weatui/sirenlisten.py</div>
+    <pre><code>#!/usr/bin/env python3
+"""Outdoor warning siren detector. Advisory cross-check only: this never
+raises an alarm by itself, it only reports agreement or disagreement with
+the NWS feed."""
+import numpy as np, subprocess, collections, time, pathlib, logging
+
+RATE, FRAME = 16000, 4096                 # ~3.9 frames/s
+BAND = (400, 1600)                        # siren fundamentals live here
+HOLD_S = 90                               # sustained tone before we believe it
+PITCH_TOL = 0.06                          # 6% drift allowed across the window
+SNR_DB = 12                               # above the rolling noise floor
+STATE = pathlib.Path("/run/weatui/siren_heard")
+
+hist = collections.deque(maxlen=int(HOLD_S * RATE / FRAME))
+noise_floor = None
+
+def dominant(frame):
+    """Peak frequency and its SNR over the rolling floor, in the siren band."""
+    global noise_floor
+    w = np.hanning(len(frame))
+    mag = np.abs(np.fft.rfft(frame * w))
+    freqs = np.fft.rfftfreq(len(frame), 1 / RATE)
+    sel = (freqs >= BAND[0]) & (freqs <= BAND[1])
+    band = mag[sel]
+    if not band.size:
+        return None, 0.0
+    peak = float(freqs[sel][np.argmax(band)])
+    power = float(np.max(band))
+    med = float(np.median(mag))
+    noise_floor = med if noise_floor is None else 0.995 * noise_floor + 0.005 * med
+    snr = 20 * np.log10(power / max(noise_floor, 1e-9))
+    return peak, snr
+
+def verdict():
+    """A siren is a tone that is loud, sustained, and refuses to move."""
+    if len(hist) < hist.maxlen:
+        return False, "collecting"
+    tones = [f for f, s in hist if s >= SNR_DB]
+    coverage = len(tones) / len(hist)
+    if coverage < 0.85:                    # must be near-continuous, not a pass-by
+        return False, f"intermittent ({coverage:.0%})"
+    arr = np.array(tones)
+    drift = (arr.max() - arr.min()) / arr.mean()
+    if drift > PITCH_TOL:                  # a wail sweeps; a siren does not
+        return False, f"pitch sweeping ({drift:.0%}) - likely a vehicle"
+    return True, f"steady {arr.mean():.0f} Hz for {HOLD_S}s"
+
+proc = subprocess.Popen(
+    ["arecord", "-D", "plughw:1", "-c1", "-r", str(RATE), "-f", "S32_LE", "-t", "raw"],
+    stdout=subprocess.PIPE)
+
+logging.basicConfig(format="%(asctime)s %(message)s", level=logging.INFO)
+while True:
+    raw = proc.stdout.read(FRAME * 4)
+    if not raw:
+        break
+    frame = np.frombuffer(raw, dtype=np.int32).astype(np.float64) / 2**31
+    hist.append(dominant(frame))
+    heard, why = verdict()
+    if heard and not STATE.exists():
+        STATE.write_text(str(int(time.time())))
+        logging.info("SIREN DETECTED: %s", why)
+        # Cross-check, never a direct alarm.
+        subprocess.run(["/usr/local/lib/weatui/siren-crosscheck.sh"], check=False)
+    elif not heard and STATE.exists() and "intermittent" in why:
+        STATE.unlink(missing_ok=True)
+        logging.info("siren ended: %s", why)</code></pre>
+
+    <div class="filename">/usr/local/lib/weatui/siren-crosscheck.sh</div>
+    <pre><code>#!/bin/bash
+# Called when the listener believes it heard the outdoor siren.
+set -euo pipefail
+
+# Suppress during the scheduled monthly test. Set to your county's schedule;
+# first Wednesday around noon is common but far from universal.
+if [ "$(date +%u)" = "3" ] &amp;&amp; [ "$(date +%d)" -le 7 ] &amp;&amp;
+   [ "$(date +%H)" = "12" ]; then
+  date +%s &gt; /var/lib/weatui/last_siren_test
+  logger -t weatui-siren "monthly siren test heard, detector healthy"
+  exit 0
+fi
+
+if [ -f /run/weatui/alert_active ]; then
+  logger -t weatui-siren "siren corroborates an active NWS warning"
+  exit 0
+fi
+
+# Siren with no warning. Either the county knows something the wire has not
+# carried yet, or our own receive path is broken. Both deserve attention.
+logger -t weatui-siren "SIREN WITH NO NWS ALERT - possible feed failure"
+exec /usr/local/lib/weatui/annunciate.sh SEVERE "SIREN HEARD, NO ALERT"</code></pre>
+
+    <div class="prove">
+      <div class="lbl">Prove it</div>
+      <ol>
+        <li>Record 10 seconds and confirm the waveform is not clipped and not pure hiss: <code>arecord -D plughw:1 -c1 -r 16000 -f S32_LE -d 10 test.wav</code></li>
+        <li>Play a 900 Hz tone from a phone speaker near the mic for two minutes. The detector should fire at about 90 seconds.</li>
+        <li>Play an emergency vehicle wail recording at the same volume. It must <strong>not</strong> fire, and the log should say "pitch sweeping".</li>
+        <li>Play a yelp pattern and a hi-lo. Neither should fire.</li>
+        <li><strong>Catch the monthly test.</strong> Confirm detection, and keep the recording as your calibration reference.</li>
+        <li>Leave it running through a full week of ordinary neighbourhood traffic and count false positives. You want zero. If you get any, raise <code>HOLD_S</code> before touching anything else.</li>
+        <li>Confirm the cross-check logic: with no active alert, a detection must produce the <span class="pill severe">SEVERE</span> "no alert" notice, not a tornado pattern.</li>
+      </ol>
+    </div>
+
+    <h3>7.6 If you skip this stage</h3>
+    <p>Nothing else depends on it. It is the only stage in this manual whose absence costs you no coverage, because it adds no channel you did not already have. Build it if you want the cross-check and the extra self-test, or if you happen to live within earshot of a pole. Skip it if you do not, and spend the effort on the stage 4 antenna instead, which will do far more for you.</p>
+  </div>
+</section>
+
+<hr>
+
+<section id="selftest">
+  <div class="stage-head"><span class="stage-num">03</span><h2>Self-test regime</h2></div>
+  <div class="col">
+    <p>A safety device that fails silently has negative value, because it replaces appropriate worry with false confidence. You are better off with nothing than with a box you trust that stopped working in March.</p>
+    <p>This section deserves more of your engineering attention than the radar does.</p>
+
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>Check</th><th>Cadence</th><th>Detects</th><th>Method</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>Missed RWT alarm</strong></td><td>Weekly</td>
+            <td>Antenna disconnected, receiver dead, decoder crashed, out of range</td>
+            <td>NWR transmits a Required Weekly Test. Expect it. No RWT in 8 days means the RF chain is broken and the device must say so loudly. Free, and it proves the whole path end to end.</td>
+          </tr>
+          <tr>
+            <td><strong>Siren current sense</strong></td><td>Monthly</td>
+            <td>Blown speaker, cut wire, failed MOSFET</td>
+            <td>Sounding a dead siren produces a silence indistinguishable from success. Measure current through the shunt during the test and alarm if it is out of range.</td>
+          </tr>
+          <tr>
+            <td><strong>Battery load test</strong></td><td>Monthly</td>
+            <td>Degraded pack</td>
+            <td>Drop to battery under load for 60 s, log the voltage sag. Compare against the baseline you recorded when new.</td>
+          </tr>
+          <tr>
+            <td><strong>Feed staleness</strong></td><td>Continuous</td>
+            <td>Dead poller, network partition, NWS outage</td>
+            <td>Already built in via <code>stale_after_secs</code> and <code>send_gap_recovery</code>. Escalate to hardware annunciation.</td>
+          </tr>
+          <tr>
+            <td><strong>Monthly siren test</strong></td><td>Monthly</td>
+            <td>Dead microphone, detector regression, drifted threshold</td>
+            <td>If stage 7 is built: your county's scheduled siren test proves the acoustic chain and refreshes the spectral template. Missing two in a row means the listener is broken. Same free-verification trick as the weekly radio test.</td>
+          </tr>
+          <tr>
+            <td>Audible chirp</td><td>Daily</td>
+            <td>Total system death</td>
+            <td>One short chirp at a set time. Its absence is the signal, so pick a time you are reliably home and awake.</td>
+          </tr>
+          <tr>
+            <td>Full-volume test</td><td>Monthly</td>
+            <td>Everything, together</td>
+            <td>The complete pattern at full volume. Schedule it, warn the household, and do not skip it.</td>
+          </tr>
+          <tr>
+            <td>Clock sanity</td><td>Hourly</td>
+            <td>Drift breaking alert expiry</td>
+            <td>Compare system time against GPS and NTP. Divergence over 30 s is a fault.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="filename">/usr/local/lib/weatui/selftest.sh</div>
+    <pre><code>#!/bin/bash
+# Daily. Escalates to the siren only when something is actually wrong.
+set -euo pipefail
+FAULTS=()
+
+# 1. Weekly test received recently? Proves the entire RF chain.
+if [ -f /var/lib/weatui/last_rwt ]; then
+  AGE=$(( $(date +%s) - $(cat /var/lib/weatui/last_rwt) ))
+  [ "$AGE" -gt 691200 ] &amp;&amp; FAULTS+=("no NWR weekly test in $((AGE/86400)) days")
+else
+  FAULTS+=("no NWR weekly test ever received")
+fi
+
+# 2. Alert daemon alive and polling?
+systemctl is-active --quiet weatui || FAULTS+=("weatui service down")
+systemctl is-active --quiet weatui-same || FAULTS+=("SAME receiver down")
+
+# 3. Clock sane?
+chronyc tracking | grep -q "Leap status.*Normal" || FAULTS+=("clock not synchronised")
+
+# 4. Battery holding?
+V=$(python3 /usr/local/lib/weatui/read_ina219.py)
+(( $(echo "$V &lt; 12.8" | bc -l) )) &amp;&amp; FAULTS+=("battery low: ${V}V")
+
+# 5. Storage healthy?
+[ "$(df --output=pcent / | tail -1 | tr -dc 0-9)" -gt 90 ] &amp;&amp; FAULTS+=("disk over 90%")
+
+if [ ${#FAULTS[@]} -eq 0 ]; then
+  /usr/local/lib/weatui/chirp.sh ok        # one short beep: alive and well
+  logger -t weatui-selftest "PASS"
+else
+  logger -t weatui-selftest "FAULT: ${FAULTS[*]}"
+  # A degraded safety device must be as loud about it as a real alert.
+  /usr/local/lib/weatui/annunciate.sh SEVERE "SELF TEST FAILED"
+fi</code></pre>
+
+    <div class="note">
+      <span class="lbl">Never auto-update during weather</span>
+      <p>If you add unattended upgrades, gate them on there being no active alert. Rebooting a household mid-tornado-warning to apply a patch is the kind of failure that only happens once.</p>
+      <pre style="margin:10px 0 0"><code>ExecStartPre=/bin/sh -c '! test -f /run/weatui/alert_active'</code></pre>
+    </div>
+  </div>
+</section>
+
+<hr>
+
+<section id="testing">
+  <div class="stage-head"><span class="stage-num">04</span><h2>Testing without a storm</h2></div>
+  <div class="col">
+    <p>You cannot wait for a tornado to find out whether this works. Every path below can be exercised deliberately.</p>
+
+    <div class="warn">
+      <span class="lbl">Never transmit on NWR frequencies</span>
+      <p>Transmitting on 162.400&ndash;162.550 MHz is a federal offence and interferes with a public safety service. Do not build a test transmitter, not even at low power, not even into a dummy load you believe is sealed. Every test below injects signal <strong>after</strong> the antenna, in software.</p>
+    </div>
+
+    <h3>Path-by-path</h3>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>Path</th><th>How to exercise it</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Script hook</strong></td><td>Call <code>annunciate.sh</code> directly with each tier and with the escalation environment variables set.</td></tr>
+          <tr><td><strong>weatui alert logic</strong></td><td>Point <code>[location]</code> temporarily at coordinates inside an area with an active warning somewhere in the country, and confirm the whole chain fires. Set it back afterwards, and put a reminder somewhere you will see it.</td></tr>
+          <tr><td><strong>SAME decoder</strong></td><td>Feed a recorded SAME burst straight into <code>samedec</code>, bypassing RF entirely. The <a href="https://github.com/cbs228/sameold">sameold</a> repository ships test samples.<br><code>samedec -r 22050 -- ./same-handler.sh &lt; sample.raw</code></td></tr>
+          <tr><td><strong>RF chain</strong></td><td>The weekly test. There is no substitute and it costs nothing but patience.</td></tr>
+          <tr><td><strong>Power failover</strong></td><td>Pull the plug. Repeat under siren load, which is when brownouts show up.</td></tr>
+          <tr><td><strong>Pi failure</strong></td><td><code>systemctl stop weatui</code>, then pull the Pi's power entirely. The MCU must carry on.</td></tr>
+          <tr><td><strong>Feed loss</strong></td><td>Block outbound traffic: <code>sudo iptables -A OUTPUT -d api.weather.gov -j DROP</code>. Confirm the stale warning fires after <code>stale_after_secs</code>, then unblock and confirm the feed-recovery alert.</td></tr>
+          <tr><td><strong>Storm cell tracking</strong></td><td>Replay a historical outbreak from the NEXRAD archive. Your tree already has an ignored test that does exactly this against KTLX for 2013-05-20:<br><code>cargo test moore -- --ignored --nocapture</code></td></tr>
+          <tr><td><strong>The whole thing</strong></td><td>Hand someone else the trigger and go to sleep. Everything above tests components; only this tests the product.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<hr>
+
+<section id="failure">
+  <div class="stage-head"><span class="stage-num">05</span><h2>Failure modes</h2></div>
+  <div class="col">
+    <p>Every row is a way this device can quietly stop protecting you. The right-hand column is what makes the failure loud instead.</p>
+  </div>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>Failure</th><th>Likelihood</th><th>Detection</th><th>Mitigation</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Mains power loss</strong></td><td><span class="pill severe">HIGH</span></td><td>INA219 bus voltage</td><td>LiFePO4 ride-through, shed radar and HRRR</td></tr>
+        <tr><td><strong>Internet loss</strong></td><td><span class="pill severe">HIGH</span></td><td><code>stale_after_secs</code></td><td>SAME radio carries on alone</td></tr>
+        <tr><td><strong>SD card wear</strong></td><td><span class="pill severe">HIGH</span></td><td>SMART, read errors</td><td>Do not use SD. NVMe or eMMC only.</td></tr>
+        <tr><td><strong>Antenna disconnected</strong></td><td><span class="pill severe">MED</span></td><td>Missed weekly test</td><td>Alarm after 8 days with no RWT</td></tr>
+        <tr><td><strong>Dead siren</strong></td><td><span class="pill severe">MED</span></td><td>Current sense during monthly test</td><td>Annunciate the fault on the strobe and log</td></tr>
+        <tr><td><strong>Battery degraded</strong></td><td><span class="pill severe">MED</span></td><td>Monthly load test vs baseline</td><td>User-replaceable pack, warn early</td></tr>
+        <tr><td><strong>App hang or crash</strong></td><td><span class="pill severe">MED</span></td><td>systemd watchdog on the alert loop</td><td><code>Restart=always</code>; MCU unaffected either way</td></tr>
+        <tr><td><strong>User silenced and fell asleep</strong></td><td><span class="pill severe">MED</span></td><td>Silence timer</td><td>Bounded 10 min window, then auto re-arm</td></tr>
+        <tr><td>Bad update</td><td><span class="pill watch">LOW</span></td><td>Boot counter</td><td>A/B partitions with rollback; never update during an alert</td></tr>
+        <tr><td>Clock drift while offline</td><td><span class="pill watch">LOW</span></td><td>GPS vs system time</td><td>RTC cell plus GPS refclock</td></tr>
+        <tr><td>NWS API schema change</td><td><span class="pill watch">LOW</span></td><td>Parse errors in the log</td><td>Loud degraded state; SAME is unaffected</td></tr>
+        <tr><td>Spoofed SAME broadcast</td><td><span class="pill watch">LOW</span></td><td>No matching CAP alert</td><td>Log the discrepancy, still sound. False positive beats false negative.</td></tr>
+        <tr><td>Kernel panic / filesystem corruption</td><td><span class="pill watch">LOW</span></td><td>MCU heartbeat timeout</td><td>MCU sounds on its own and keeps the radio path alive</td></tr>
+        <tr><td>Silent total receive failure</td><td><span class="pill watch">LOW</span></td><td>Siren heard with no corresponding alert</td><td>Stage 7 cross-check. The one case where hearing the neighbourhood siren tells you something the wire did not.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<hr>
+
+<section id="place">
+  <div class="stage-head"><span class="stage-num">06</span><h2>Placement</h2></div>
+  <div class="col">
+    <p>The best-engineered alarm in the world is useless in the wrong room. Placement is not an afterthought; for this device it is roughly half the performance.</p>
+  </div>
+
+  <figure class="wide">
+    <div class="fig-box">
+      <svg viewBox="0 0 780 330" width="780" height="330" role="img" aria-label="Floor plan showing base unit placement in a central hallway with the antenna in the attic and annunciators in bedrooms">
+        <!-- house outline -->
+        <rect x="40" y="60" width="620" height="230" rx="3" class="svg-fill-g svg-stroke-2" stroke-width="2"/>
+
+        <!-- attic band -->
+        <path d="M40 60 L 350 16 L 660 60 Z" class="svg-fill-s svg-stroke-2"/>
+        <text x="296" y="48" class="svg-sub">ATTIC</text>
+        <circle cx="470" cy="42" r="5" class="svg-accent-f"/>
+        <text x="484" y="46" class="svg-sub" style="fill:var(--accent)">ANTENNA: highest point, vertical</text>
+
+        <!-- rooms -->
+        <line x1="240" y1="60" x2="240" y2="290" class="svg-stroke-2"/>
+        <line x1="460" y1="60" x2="460" y2="290" class="svg-stroke-2"/>
+        <line x1="240" y1="175" x2="40" y2="175" class="svg-stroke-2"/>
+        <line x1="460" y1="175" x2="660" y2="175" class="svg-stroke-2"/>
+
+        <text x="58" y="88" class="svg-sub">BEDROOM 1</text>
+        <text x="58" y="200" class="svg-sub">BEDROOM 2</text>
+        <text x="292" y="88" class="svg-sub">HALL</text>
+        <text x="478" y="88" class="svg-sub">LIVING</text>
+        <text x="478" y="200" class="svg-sub">SHELTER / BASEMENT</text>
+
+        <!-- base unit -->
+        <rect x="286" y="150" width="108" height="52" rx="3" class="svg-fill-s svg-lethal-s" stroke-width="2"/>
+        <text x="298" y="171" class="svg-label" style="fill:var(--lethal)">BASE UNIT</text>
+        <text x="298" y="186" class="svg-sub">central, 1.5 m high</text>
+
+        <!-- annunciators -->
+        <circle cx="120" cy="120" r="13" class="svg-fill-s svg-accent-s" stroke-width="2"/>
+        <text x="112" y="125" class="svg-sub" style="fill:var(--accent)">A1</text>
+        <circle cx="120" cy="232" r="13" class="svg-fill-s svg-accent-s" stroke-width="2"/>
+        <text x="112" y="237" class="svg-sub" style="fill:var(--accent)">A2</text>
+
+        <line x1="286" y1="176" x2="133" y2="126" class="svg-accent-s" stroke-dasharray="4 3"/>
+        <line x1="286" y1="180" x2="133" y2="228" class="svg-accent-s" stroke-dasharray="4 3"/>
+        <path d="M340 150 L 340 60 L 440 46" class="svg-accent-s" stroke-width="1.5"/>
+        <text x="346" y="112" class="svg-sub" style="fill:var(--accent)">coax</text>
+
+        <text x="40" y="312" class="svg-sub">A1/A2 = bedroom annunciators: siren + strobe + bed shaker, wired or 915 MHz link</text>
+      </svg>
+    </div>
+    <figcaption><b>Fig. 4.</b> Placement. The base unit goes central so the primary siren reaches the whole house; annunciators go where people sleep. Antenna as high as you can get it, which usually means the attic.</figcaption>
+  </figure>
+
+  <div class="col">
+    <div class="grid2">
+      <div class="card">
+        <h5>Do</h5>
+        <ul>
+          <li>Mount centrally, roughly 1.5 m up, with the siren facing the bedroom hallway.</li>
+          <li>Run the antenna to the attic or outside. Height dominates every other factor.</li>
+          <li>Put a strobe and shaker in each bedroom, not just a siren in the hall.</li>
+          <li>Keep the ack button reachable but not from the bed. Standing up wakes you enough to decide properly.</li>
+          <li>Label it. Anyone in the house should know what it is and what to do.</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h5>Do not</h5>
+        <ul>
+          <li>Put it in the basement with a whip antenna and expect reception.</li>
+          <li>Mount it in a closed cabinet. It needs airflow and an unobstructed acoustic path.</li>
+          <li>Place the antenna next to the buck converters or the Pi. Switching noise at VHF is real.</li>
+          <li>Put the only annunciator behind a closed door from where you sleep.</li>
+          <li>Install it in the storm shelter alone. You need warning <em>before</em> you are in the shelter.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<hr>
+
+<section id="legal">
+  <div class="stage-head"><span class="stage-num">07</span><h2>Legal and safety</h2></div>
+  <div class="col">
+    <div class="warn">
+      <span class="lbl">Radio</span>
+      <p>Receiving is unrestricted. <strong>Transmitting on NWR frequencies is a federal offence</strong> and interferes with a public safety service. Do not build a test transmitter under any circumstances.</p>
+    </div>
+    <div class="warn amber">
+      <span class="lbl">Electrical</span>
+      <p>Do not build mains-voltage circuits. Use listed, sealed adapters and keep your work on the DC side. Fuse the battery at the terminal. Use LiFePO4 with an integrated BMS, and never charge lithium chemistry with a lead-acid profile charger.</p>
+    </div>
+    <div class="warn amber">
+      <span class="lbl">If you ever give one away</span>
+      <p>The moment this leaves your house it stops being a personal project. Selling or distributing a device marketed for life safety brings product liability exposure, and the intentional radiators need FCC Part 15 testing (budget $5&ndash;15k). The consumer standard you would be measured against is <strong>CTA-2009 &ldquo;Public Alert&rdquo;</strong>, plus UN38.3 and IEC 62133 for shipping the battery. Build one for yourself. Think hard before building a second one for someone else.</p>
+    </div>
+
+    <h3>Coverage limits</h3>
+    <ul>
+      <li><strong>United States only.</strong> NEXRAD, NWS CAP, HRRR, and NWR SAME are all US services. None of this works elsewhere.</li>
+      <li>Radar-derived cell tracking understates the speed of fast supercells, because centroid tracking on a large storm creeps. Measured on the 2013-05-20 KTLX archive, the tornado read 16 kt against roughly 30 kt actual. Treat ETA as an order-of-magnitude figure, not a countdown.</li>
+      <li>Set a proper contact <code>User-Agent</code> for <code>api.weather.gov</code> and keep <code>poll_interval_secs</code> reasonable. It is a free public service run for everyone.</li>
+    </ul>
+
+    <h3>The one thing to take away</h3>
+    <p>Build stages 1 through 4 and you will have something that survives grid loss and internet loss and wakes you up. Add stage 5 and it survives its own computer dying. Skip the self-test regime and none of that matters, because you will not find out it broke until the night you needed it.</p>
+    <p>And keep the cheap weather radio in the closet anyway.</p>
+  </div>
+</section>
+
+</main>
+</div>
+
+</body>
+</html>
