@@ -123,6 +123,18 @@ impl AlertState {
         self.active.values()
     }
 
+    /// Removal used to depend entirely on the alert leaving `/alerts/active`,
+    /// so a feed that goes quiet mid-event left expired warnings on screen
+    /// looking live. Alerts with no parseable expiry are kept: the feed is
+    /// still the authority for those.
+    pub fn prune_expired(&mut self, now: chrono::DateTime<chrono::Utc>) -> usize {
+        let before = self.active.len();
+        self.active
+            .retain(|_, a| a.alert.expires_at().is_none_or(|t| t > now));
+        self.notified.retain(|k, _| self.active.contains_key(k));
+        before - self.active.len()
+    }
+
     pub fn mark_poll_success(&mut self, now_epoch: u64) {
         self.last_success_epoch = Some(now_epoch);
     }
@@ -363,6 +375,41 @@ mod tests {
             &f,
         );
         assert_eq!(st.active().map(|a| a.tier).max(), Some(ThreatTier::Lethal));
+    }
+
+    fn alert_expiring(vtec: &str, expires: &str) -> Alert {
+        let json = format!(
+            r#"{{"features":[{{"geometry":null,"properties":{{"event":"Tornado Warning","expires":"{expires}","parameters":{{"VTEC":["{vtec}"]}}}}}}]}}"#
+        );
+        let parsed: AlertCollection = serde_json::from_str(&json).unwrap();
+        Alert::from_feature(parsed.features.into_iter().next().unwrap())
+    }
+
+    #[test]
+    fn an_expired_alert_is_dropped_without_waiting_for_the_feed() {
+        let mut st = AlertState::new();
+        let f = filter();
+        let expires = "2026-07-27T07:30:00Z";
+        st.ingest(vec![alert_expiring(TOR_NEW, expires)], &f);
+        assert_eq!(st.active().count(), 1);
+
+        let before = chrono::DateTime::parse_from_rfc3339("2026-07-27T07:20:00Z").unwrap().to_utc();
+        assert_eq!(st.prune_expired(before), 0, "still live");
+        assert_eq!(st.active().count(), 1);
+
+        let after = chrono::DateTime::parse_from_rfc3339("2026-07-27T07:31:00Z").unwrap().to_utc();
+        assert_eq!(st.prune_expired(after), 1, "past its expiry");
+        assert_eq!(st.active().count(), 0);
+    }
+
+    #[test]
+    fn an_alert_with_no_expiry_is_left_to_the_feed() {
+        let mut st = AlertState::new();
+        let f = filter();
+        st.ingest(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f);
+        let far_future = chrono::DateTime::parse_from_rfc3339("2099-01-01T00:00:00Z").unwrap().to_utc();
+        assert_eq!(st.prune_expired(far_future), 0);
+        assert_eq!(st.active().count(), 1);
     }
 
     #[test]

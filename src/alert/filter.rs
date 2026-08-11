@@ -83,6 +83,14 @@ impl Filter {
         if self.extra_events.contains(&alert.properties.event) {
             return Some(ThreatTier::Severe);
         }
+
+        // Fail open, loudly. A product that carried VTEC none of which parsed
+        // is a malformed or newly-introduced code, and if its event name says
+        // Warning it is a real hazard the allowlist can never match. Dropping
+        // it silently is the one outcome that cannot be recovered from.
+        if alert.vtec_unparsed() && alert.properties.event.ends_with("Warning") {
+            return Some(ThreatTier::Severe);
+        }
         None
     }
 }
@@ -199,6 +207,31 @@ mod tests {
             let a = alert_with(event, Some(vtec));
             assert_eq!(filter().classify(&a), Some(tier), "{event} {vtec}");
         }
+    }
+
+    #[test]
+    fn a_warning_whose_vtec_will_not_parse_is_not_silently_dropped() {
+        let broken = alert_with("Tornado Warning", Some("/O.NEW.KTLX.NOT-A-VTEC/"));
+        assert!(broken.vtec_unparsed(), "fixture must actually fail to parse");
+        assert_eq!(
+            filter().classify(&broken),
+            Some(ThreatTier::Severe),
+            "a malformed code on a real warning must fail open, not vanish"
+        );
+    }
+
+    #[test]
+    fn a_product_with_no_vtec_at_all_is_unaffected_by_the_fail_open_path() {
+        let a = alert_with("Air Quality Alert", None);
+        assert!(!a.vtec_unparsed());
+        assert_eq!(filter().classify(&a), None);
+    }
+
+    #[test]
+    fn a_malformed_vtec_on_a_non_warning_product_still_rejects() {
+        let a = alert_with("Rip Current Statement", Some("/garbage/"));
+        assert!(a.vtec_unparsed());
+        assert_eq!(filter().classify(&a), None, "fail-open is scoped to Warning products");
     }
 
     #[test]

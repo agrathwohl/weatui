@@ -121,6 +121,8 @@ impl AlertEngine {
             }
         };
 
+        self.state.prune_expired(chrono::Utc::now());
+
         if let Some(gap) = gap_to_report(gap_before_poll, succeeded, self.stale_after_secs) {
             out.recovered_after_gap_secs = Some(gap);
             self.last_stale_warning = None;

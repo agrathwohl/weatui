@@ -21,7 +21,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::{execute, terminal};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use std::io::{Stdout, stdout};
 use std::sync::Arc;
@@ -298,6 +298,26 @@ pub fn feed_health(
 }
 
 impl App {
+    /// True only on the most recent observed volume. Anything else is history
+    /// or model output, and per-cell diagnostics measured from the live volume
+    /// do not describe it.
+    fn on_live_frame(&self) -> bool {
+        let newest_observed = self
+            .ring
+            .frames()
+            .filter(|f| !f.projected)
+            .last()
+            .map(|f| f.captured_at);
+        self.ring
+            .current()
+            .is_some_and(|f| !f.projected && Some(f.captured_at) == newest_observed)
+    }
+
+    /// The displayed frame is model output rather than a measurement.
+    fn showing_forecast(&self) -> bool {
+        self.ring.current().is_some_and(|f| f.projected)
+    }
+
     /// Minutes since the newest observed volume. Only the alert feed had a
     /// staleness indicator, so a dead radar task left the ring animating old
     /// frames indefinitely with nothing on screen saying how old they were.
@@ -650,16 +670,7 @@ impl App {
         }
         // Cell markers describe the newest observed volume; on history or
         // forecast frames they would sit on echo they do not belong to.
-        let newest_observed = self
-            .ring
-            .frames()
-            .filter(|f| !f.projected)
-            .last()
-            .map(|f| f.captured_at);
-        let on_live_frame = self
-            .ring
-            .current()
-            .is_some_and(|f| !f.projected && Some(f.captured_at) == newest_observed);
+        let on_live_frame = self.on_live_frame();
         let selected = self.selected_index();
         for (i, cell) in self.cells.iter().enumerate().filter(|_| on_live_frame) {
             let rgb = if selected == Some(i) {
@@ -707,10 +718,14 @@ impl App {
             RadarRaster { grid: &grid, overlay: Some(&overlay), colormap: self.colormap, product: self.product },
             map,
         );
+        let forecast = self.showing_forecast();
         frame.render_widget(
             crate::render::labels::MapText {
                 viewport: &self.viewport,
-                cells: &self.cells,
+                // Hazard letters are measured off the live volume. On a
+                // forecast frame they would label model echo with observed
+                // diagnostics, which is a claim the data does not support.
+                cells: if self.on_live_frame() { &self.cells } else { &[] },
                 show_cities: self.show_map,
                 show_hazards: self.show_labels,
                 surface_temp_f: self.conditions.as_ref().and_then(|c| c.temp_f),
@@ -719,6 +734,30 @@ impl App {
             },
             map,
         );
+
+        // The map area is otherwise pixel-identical for an observed volume and
+        // an 18-hour model run, and playback walks between them without any
+        // visual change. One row inside the map, not just the timeline.
+        if forecast && map.height > 0 {
+            let lead = self
+                .ring
+                .current()
+                .map(|f| (f.captured_at - chrono::Utc::now()).num_minutes().max(0))
+                .unwrap_or(0);
+            frame.render_widget(
+                Paragraph::new(format!(
+                    " {} FORECAST +{lead}m - MODEL OUTPUT, NOT OBSERVED ",
+                    crate::render::timeline::PROJECTED
+                ))
+                .style(
+                    Style::default()
+                        .fg(Color::Rgb(20, 20, 30))
+                        .bg(Color::Rgb(190, 140, 255))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Rect { height: 1, ..map },
+            );
+        }
 
         // An empty frame and a broken one are the same black rectangle, so an
         // empty one has to say so on the map rather than only in the status.
@@ -1610,6 +1649,36 @@ mod tests {
                 Colormap::Threat
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn hazard_letters_do_not_label_model_output() {
+        let mut app = app_with_cells(2);
+        assert!(app.on_live_frame(), "the fixture starts on the observed volume");
+        assert!(!app.showing_forecast());
+
+        app.ring.push(crate::radar::ring::RadarFrame {
+            captured_at: chrono::Utc::now() + chrono::Duration::minutes(90),
+            field: std::sync::Arc::new(crate::radar::testing::DiskField {
+                centre: Coords { lat: 36.0, lon: -87.0 },
+                radius_km: 25.0,
+                dbz: 55.0,
+            }),
+            projected: true,
+        });
+        for _ in 0..app.ring.frames().count() {
+            if app.showing_forecast() {
+                break;
+            }
+            app.ring.advance_playback();
+        }
+
+        assert!(app.showing_forecast(), "should be sitting on the forecast frame");
+        assert!(
+            !app.on_live_frame(),
+            "a forecast frame must not count as live, or cell diagnostics measured \
+             from the observed volume get painted onto model echo"
         );
     }
 

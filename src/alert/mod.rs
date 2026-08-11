@@ -9,11 +9,57 @@ use std::collections::HashMap;
 
 pub type Ring = Vec<[f64; 2]>;
 
+/// GeoJSON positions are `[lon, lat]` with an OPTIONAL third elevation value.
+/// `Vec<[f64; 2]>` rejected the three-element form outright, and because the
+/// whole response is one deserialize, a single such coordinate anywhere lost
+/// every alert in the batch including a tornado warning.
+fn rings_from_positions<'de, D>(d: D) -> Result<Vec<Ring>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Vec<Vec<Vec<f64>>> = Vec::deserialize(d)?;
+    Ok(raw
+        .into_iter()
+        .map(|ring| {
+            ring.into_iter()
+                .filter(|p| p.len() >= 2)
+                .map(|p| [p[0], p[1]])
+                .collect()
+        })
+        .collect())
+}
+
+fn polygons_from_positions<'de, D>(d: D) -> Result<Vec<Vec<Ring>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Vec<Vec<Vec<Vec<f64>>>> = Vec::deserialize(d)?;
+    Ok(raw
+        .into_iter()
+        .map(|poly| {
+            poly.into_iter()
+                .map(|ring| {
+                    ring.into_iter()
+                        .filter(|p| p.len() >= 2)
+                        .map(|p| [p[0], p[1]])
+                        .collect()
+                })
+                .collect()
+        })
+        .collect())
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
 pub enum Geometry {
-    Polygon { coordinates: Vec<Ring> },
-    MultiPolygon { coordinates: Vec<Vec<Ring>> },
+    Polygon {
+        #[serde(deserialize_with = "rings_from_positions")]
+        coordinates: Vec<Ring>,
+    },
+    MultiPolygon {
+        #[serde(deserialize_with = "polygons_from_positions")]
+        coordinates: Vec<Vec<Ring>>,
+    },
     #[serde(other)]
     Other,
 }
@@ -79,7 +125,24 @@ pub struct AlertCollection {
     /// portal) parsed as zero alerts, cleared all active state and counted as
     /// a successful poll. That is the one failure the staleness backstop
     /// cannot catch, because nothing failed.
+    #[serde(deserialize_with = "features_skipping_malformed")]
     pub features: Vec<Feature>,
+}
+
+/// One unparseable feature used to discard every other alert in the response.
+/// Losing one alert is bad; losing a tornado warning because some unrelated
+/// product had a surprising shape is worse, so bad entries are skipped
+/// individually. `features` itself is still required, so a wholesale schema
+/// change is still an error rather than an empty sky.
+fn features_skipping_malformed<'de, D>(d: D) -> Result<Vec<Feature>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Vec<serde_json::Value> = Vec::deserialize(d)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|v| serde_json::from_value(v).ok())
+        .collect())
 }
 
 #[derive(Debug, Clone)]
@@ -87,20 +150,42 @@ pub struct Alert {
     pub properties: Properties,
     pub geometry: Option<Geometry>,
     pub vtec: Vec<vtec::VtecCode>,
+    vtec_unparsed: bool,
 }
 
 impl Alert {
     pub fn from_feature(feature: Feature) -> Self {
-        let vtec = vtec::VtecCode::parse_all(&feature.properties.param("VTEC"));
+        let raw = feature.properties.param("VTEC");
+        let vtec = vtec::VtecCode::parse_all(&raw);
         Alert {
+            vtec_unparsed: !raw.is_empty() && vtec.is_empty(),
             properties: feature.properties,
             geometry: feature.geometry,
             vtec,
         }
     }
 
+    /// The product carried VTEC strings and none of them parsed. Distinct from
+    /// carrying none at all: a malformed or newly-introduced code on a real
+    /// warning would otherwise take the no-VTEC path and be dropped by an
+    /// allowlist it can never match.
+    pub fn vtec_unparsed(&self) -> bool {
+        self.vtec_unparsed
+    }
+
     pub fn primary_vtec(&self) -> Option<&vtec::VtecCode> {
         self.vtec.first()
+    }
+
+    /// `properties.expires` was parsed for display only, so an alert lingered
+    /// until the feed stopped returning it. If the feed goes quiet mid-event,
+    /// an expired warning stays on screen looking live.
+    pub fn expires_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.properties
+            .expires
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|t| t.to_utc())
     }
 
     pub fn motion(&self) -> Option<motion::StormMotion> {
@@ -179,6 +264,34 @@ mod tests {
             [-98.0, 36.0],
             [-98.0, 35.0],
         ]
+    }
+
+    #[test]
+    fn a_three_element_position_does_not_discard_the_batch() {
+        let json = r#"{"features":[
+            {"geometry":{"type":"Polygon","coordinates":[[[-98.0,35.0,120.0],[-97.0,35.0,118.0],[-97.0,36.0,130.0],[-98.0,35.0,120.0]]]},
+             "properties":{"event":"Tornado Warning","parameters":{}}}
+        ]}"#;
+        let parsed: AlertCollection = serde_json::from_str(json).expect("elevation must not be fatal");
+        assert_eq!(parsed.features.len(), 1);
+        let alert = Alert::from_feature(parsed.features.into_iter().next().unwrap());
+        assert!(alert.contains(35.4, -97.6), "the polygon must survive with lon/lat intact");
+    }
+
+    #[test]
+    fn one_malformed_feature_does_not_lose_the_tornado_warning_beside_it() {
+        let json = r#"{"features":[
+            {"nonsense":true},
+            {"geometry":null,"properties":{"event":"Tornado Warning","parameters":{}}}
+        ]}"#;
+        let parsed: AlertCollection = serde_json::from_str(json).expect("batch must survive");
+        assert_eq!(parsed.features.len(), 1, "the bad entry is skipped, not the good one");
+        assert_eq!(parsed.features[0].properties.event, "Tornado Warning");
+    }
+
+    #[test]
+    fn a_response_with_no_features_key_is_still_an_error() {
+        assert!(serde_json::from_str::<AlertCollection>(r#"{"status":502}"#).is_err());
     }
 
     #[test]
