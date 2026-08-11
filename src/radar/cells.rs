@@ -185,6 +185,9 @@ pub struct StormCell {
     pub track_point: Coords,
     pub max_dbz: f32,
     pub rotation_ms: Option<f32>,
+    /// False when no velocity sample fell inside beam-resolution range, so
+    /// `rotation_ms: None` means unknown rather than calm.
+    pub rotation_measurable: bool,
     pub min_cc: Option<f32>,
     pub max_vil: Option<f32>,
     pub max_echo_top_km: Option<f32>,
@@ -311,12 +314,18 @@ pub fn scan(field: &dyn RadarField, site: Coords, home: Coords) -> Vec<StormCell
         });
         let mut shear: Option<f32> = None;
         let mut shear_centre: Option<(i64, i64)> = None;
+        // "not rotating" and "cannot tell whether it is rotating" rendered
+        // identically, because both produced rotation_ms = None. Beyond beam
+        // resolution range, and with no velocity at all, the answer is unknown
+        // and the display has to say so rather than imply calm.
+        let mut rotation_measurable = false;
         for (&(ix, iy), &va) in &velocity {
             if crate::geo::haversine_km(site, at(ix as usize, iy as usize))
                 > ROTATION_MAX_RANGE_KM
             {
                 continue;
             }
+            rotation_measurable = true;
             for dy in -LOCAL_RADIUS_CELLS..=LOCAL_RADIUS_CELLS {
                 for dx in -LOCAL_RADIUS_CELLS..=LOCAL_RADIUS_CELLS {
                     let Some(&vb) = velocity.get(&(ix + dx, iy + dy)) else { continue };
@@ -377,6 +386,7 @@ pub fn scan(field: &dyn RadarField, site: Coords, home: Coords) -> Vec<StormCell
             track_point,
             max_dbz,
             rotation_ms: stats.rotation_ms,
+            rotation_measurable,
             min_cc: stats.min_cc,
             max_vil: stats.max_vil,
             max_echo_top_km: stats.max_echo_top_km,

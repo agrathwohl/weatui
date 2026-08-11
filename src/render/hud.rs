@@ -11,6 +11,15 @@ use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 /// task has stopped, not that the site is between scans.
 const RADAR_STALE_MINUTES: i64 = 15;
 
+/// Height of the 0.5-degree beam centre at a cell's range. Tornadic
+/// circulations are diagnosed below ~1 km AGL, which the beam clears at around
+/// 75 km, so past that the radar is looking over the layer that matters and the
+/// operator needs to know it. Distance is measured from home rather than the
+/// site, so this is an approximation good enough to convey the trend.
+fn beam_height_km_at(range_km: f64) -> Option<f64> {
+    (range_km > 0.0).then(|| crate::radar::fetch::beam_height_km(range_km, 0.5))
+}
+
 pub fn tier_glyph(event: &str, tier: ThreatTier) -> char {
     let e = event.to_ascii_lowercase();
     if e.contains("tornado") {
@@ -83,8 +92,16 @@ fn cells_lines(
             if let Some(a) = c.approach {
                 diag.push(format!("nearest {:.0} km in {:.0}m", a.distance_km, a.minutes));
             }
-            if let Some(v) = c.rotation_ms {
-                diag.push(format!("\u{394}v {v:.0} m/s"));
+            match (c.rotation_ms, c.rotation_measurable) {
+                (Some(v), _) => diag.push(format!("\u{394}v {v:.0} m/s")),
+                // Absence of a reading is not absence of rotation. Beyond beam
+                // resolution range there is nothing to read, and rendering
+                // nothing there implied a calm storm.
+                (None, false) => diag.push("\u{394}v unknown (out of range)".to_string()),
+                (None, true) => {}
+            }
+            if let Some(h) = beam_height_km_at(c.distance_km) {
+                diag.push(format!("beam \u{2248}{h:.1} km AGL"));
             }
             if let Some(cc) = c.min_cc {
                 diag.push(format!("cc {cc:.2}"));
@@ -481,6 +498,7 @@ mod tests {
             approach: None,
             centroid: crate::geo::Coords { lat: 36.3, lon: -87.0 },
             track_point: crate::geo::Coords { lat: 36.3, lon: -87.0 },
+            rotation_measurable: true,
             max_dbz: 57.0,
             rotation_ms: Some(46.0),
             min_cc: Some(0.78),
@@ -491,6 +509,41 @@ mod tests {
             threat,
             hazards: vec![crate::radar::cells::Hazard::Rain],
         }
+    }
+
+    #[test]
+    fn unmeasurable_rotation_reads_as_unknown_not_as_calm() {
+        use crate::radar::cells::CellThreat;
+        let mut c = cell(CellThreat::Strong);
+        c.rotation_ms = None;
+
+        c.rotation_measurable = true;
+        let measured: String = cells_lines(std::slice::from_ref(&c), Some(0))
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!measured.contains("unknown"), "a real null reading is not unknown: {measured}");
+
+        c.rotation_measurable = false;
+        let unknown: String = cells_lines(std::slice::from_ref(&c), Some(0))
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            unknown.contains("\u{394}v unknown"),
+            "out of beam range must not render as absence of rotation: {unknown}"
+        );
+    }
+
+    #[test]
+    fn the_beam_climbs_above_the_tornado_layer_with_range() {
+        let near = beam_height_km_at(30.0).unwrap();
+        let far = beam_height_km_at(150.0).unwrap();
+        assert!(near < 0.5, "close in, the beam is in the layer that matters: {near}");
+        assert!(far > 2.0, "at 150 km it is well above it: {far}");
+        assert!(far > near);
     }
 
     #[test]
@@ -505,7 +558,13 @@ mod tests {
         assert!(joined.contains("rotation"), "{joined}");
         assert!(joined.contains("42 km NE"), "{joined}");
         assert!(joined.contains("57 dBZ"), "{joined}");
-        assert!(joined.contains("\u{394}v 46 m/s \u{b7} cc 0.78"), "{joined}");
+        assert!(joined.contains("\u{394}v 46 m/s"), "{joined}");
+        assert!(joined.contains("cc 0.78"), "{joined}");
+        assert!(
+            joined.contains("beam \u{2248}"),
+            "the beam height at the cell's range says whether the radar can see \
+             the low-level circulation at all: {joined}"
+        );
         assert!(
             joined.contains("VIL \u{2265}48 \u{b7} top \u{2265}14.3 km"),
             "beam-limited readings must display as floors: {joined}"

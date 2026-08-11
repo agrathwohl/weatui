@@ -1693,6 +1693,7 @@ mod tests {
                 track_point: Coords { lat: 36.0 + i as f64 * 0.3, lon: -87.0 },
                 max_dbz: 50.0,
                 rotation_ms: None,
+                rotation_measurable: true,
                 min_cc: None,
                 max_vil: None,
                 max_echo_top_km: None,

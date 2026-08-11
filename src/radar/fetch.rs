@@ -169,7 +169,7 @@ impl NexradField {
 
 /// Height of the beam centre above the radar, in km, under the standard 4/3
 /// effective-earth model that accounts for atmospheric refraction.
-fn beam_height_km(range_km: f64, elevation_deg: f32) -> f64 {
+pub fn beam_height_km(range_km: f64, elevation_deg: f32) -> f64 {
     const EFFECTIVE_EARTH_KM: f64 = 8495.0;
     let e = (elevation_deg as f64).to_radians();
     range_km * e.sin() + range_km * range_km / (2.0 * EFFECTIVE_EARTH_KM)

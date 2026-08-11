@@ -147,6 +147,7 @@ mod tests {
             track_point: at,
             max_dbz: 50.0,
             rotation_ms: None,
+            rotation_measurable: true,
             min_cc: None,
             max_vil: None,
             max_echo_top_km: None,
