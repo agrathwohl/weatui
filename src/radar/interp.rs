@@ -18,6 +18,50 @@ const SHIFT_SEARCH: i64 = 8;
 /// Echo below this does not vote on motion.
 const SHIFT_MIN_DBZ: f32 = 20.0;
 
+/// Reflectivity is logarithmic, so it cannot be averaged as a number. Blending
+/// happens in linear Z and converts back. The old dBZ-space arithmetic faded an
+/// arriving 55 dBZ core to 13.75 dBZ at alpha 0.25, painting a severe core as
+/// drizzle on the leading edge of every synthetic frame.
+fn dbz_to_z(dbz: f32) -> f32 {
+    10f32.powf(dbz / 10.0)
+}
+
+/// Below this the blend has decayed to nothing worth drawing, and log10 of a
+/// vanishing Z runs away to negative infinity.
+const MIN_BLEND_DBZ: f32 = -30.0;
+
+fn z_to_dbz(z: f32) -> Option<f32> {
+    if z <= 0.0 {
+        return None;
+    }
+    let dbz = 10.0 * z.log10();
+    (dbz > MIN_BLEND_DBZ).then_some(dbz)
+}
+
+fn blend_reflectivity(before: Option<f32>, after: Option<f32>, alpha: f32) -> Option<f32> {
+    match (before, after) {
+        (Some(x), Some(y)) => {
+            let (zx, zy) = (dbz_to_z(x), dbz_to_z(y));
+            z_to_dbz(zx + (zy - zx) * alpha)
+        }
+        (Some(x), None) => z_to_dbz(dbz_to_z(x) * (1.0 - alpha)),
+        (None, Some(y)) => z_to_dbz(dbz_to_z(y) * alpha),
+        (None, None) => None,
+    }
+}
+
+/// Only the both-present case is a real blend. Fading a one-sided sample toward
+/// zero is meaningless for these moments and actively dangerous for CC, where a
+/// value near zero is the debris signature the operator is looking for.
+fn blend_direct(before: Option<f32>, after: Option<f32>, alpha: f32) -> Option<f32> {
+    match (before, after) {
+        (Some(x), Some(y)) => Some(x + (y - x) * alpha),
+        (Some(x), None) => Some(x),
+        (None, Some(y)) => Some(y),
+        (None, None) => None,
+    }
+}
+
 pub struct InterpolatedField {
     pub before: Arc<dyn RadarField>,
     pub after: Arc<dyn RadarField>,
@@ -53,11 +97,9 @@ impl RadarField for InterpolatedField {
             },
             product,
         );
-        match (from_before, from_after) {
-            (Some(x), Some(y)) => Some(x + (y - x) * self.alpha),
-            (Some(x), None) => Some(x * (1.0 - self.alpha)),
-            (None, Some(y)) => Some(y * self.alpha),
-            (None, None) => None,
+        match product {
+            RadarProduct::Reflectivity => blend_reflectivity(from_before, from_after, self.alpha),
+            _ => blend_direct(from_before, from_after, self.alpha),
         }
     }
 
@@ -178,6 +220,39 @@ mod tests {
             None,
             "well behind the moving storm there is nothing left"
         );
+    }
+
+    #[test]
+    fn an_arriving_core_does_not_fade_to_drizzle() {
+        let before: Arc<dyn RadarField> =
+            Arc::new(DiskField { centre: Coords { lat: 20.0, lon: -87.0 }, radius_km: 25.0, dbz: 55.0 });
+        let after: Arc<dyn RadarField> =
+            Arc::new(DiskField { centre: CENTRE, radius_km: 25.0, dbz: 55.0 });
+        let field = InterpolatedField::new(before, after, 0.25, (0.0, 0.0));
+
+        let leading_edge = field
+            .value_at(CENTRE, RadarProduct::Reflectivity)
+            .expect("the arriving core is present in `after`");
+
+        assert!(
+            leading_edge > 45.0,
+            "a 55 dBZ core at alpha 0.25 must stay a severe core, got {leading_edge} dBZ"
+        );
+        assert!((leading_edge - 48.98).abs() < 0.1, "expected ~48.98 dBZ, got {leading_edge}");
+    }
+
+    #[test]
+    fn a_one_sided_correlation_sample_is_not_faded_toward_debris() {
+        assert_eq!(blend_direct(None, Some(0.98), 0.25), Some(0.98));
+        assert_eq!(blend_direct(Some(0.98), None, 0.25), Some(0.98));
+    }
+
+    #[test]
+    fn reflectivity_blending_is_symmetric_in_linear_space() {
+        let both = blend_reflectivity(Some(40.0), Some(50.0), 0.0).unwrap();
+        assert!((both - 40.0).abs() < 1e-3, "alpha 0 is the `before` value, got {both}");
+        let end = blend_reflectivity(Some(40.0), Some(50.0), 1.0).unwrap();
+        assert!((end - 50.0).abs() < 1e-3, "alpha 1 is the `after` value, got {end}");
     }
 
     #[test]

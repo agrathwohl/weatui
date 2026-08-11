@@ -7,7 +7,7 @@
 use crate::geo::Coords;
 use crate::radar::{ColumnReduction, RadarField, RadarProduct};
 use anyhow::{Context, Result, anyhow};
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use nexrad::data::aws::archive::{Identifier, download_file, list_files};
 use nexrad::data::aws::realtime::{
     Chunk, assemble_volume, download_chunk, get_latest_volume, list_chunks_in_volume,
@@ -314,22 +314,31 @@ pub async fn latest_field(site: &str) -> Result<(DateTime<Utc>, NexradField)> {
 ///
 /// The archive is keyed by UTC day, so a run shortly after 00Z would otherwise
 /// see almost nothing. Yesterday is consulted whenever today alone is short.
+/// Every volume the bucket holds for one UTC day, oldest first.
+///
+/// The archive reaches back decades, so this also replays past events, which
+/// is the only way to exercise storm behaviour that is not happening today.
+pub async fn archive_ids_on(site: &str, date: NaiveDate) -> Result<Vec<Identifier>> {
+    let mut ids = list_files(site, &date)
+        .await
+        .map_err(|e| anyhow!("failed to list archive volumes for {site} on {date}: {e}"))?;
+    // The bucket also carries _MDM metadata objects, which are not volumes.
+    ids.retain(|id| id.date_time().is_some() && !id.name().ends_with("_MDM"));
+    Ok(ids)
+}
+
 pub async fn recent_archive_ids(site: &str, count: usize) -> Result<Vec<Identifier>> {
     let today = Utc::now().date_naive();
-    let mut ids = list_files(site, &today)
-        .await
-        .map_err(|e| anyhow!("failed to list archive volumes for {site}: {e}"))?;
+    let mut ids = archive_ids_on(site, today).await?;
 
     if ids.len() < count {
         let yesterday = today - Duration::days(1);
-        if let Ok(mut earlier) = list_files(site, &yesterday).await {
+        if let Ok(mut earlier) = archive_ids_on(site, yesterday).await {
             earlier.extend(ids);
             ids = earlier;
         }
     }
 
-    // The bucket also carries _MDM metadata objects, which are not volumes.
-    ids.retain(|id| id.date_time().is_some() && !id.name().ends_with("_MDM"));
     let skip = ids.len().saturating_sub(count);
     Ok(ids.split_off(skip))
 }

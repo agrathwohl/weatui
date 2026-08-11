@@ -22,19 +22,47 @@ pub struct Notification {
     pub event: String,
     pub headline: Option<String>,
     pub area: Option<String>,
+    pub instruction: Option<String>,
+    pub damage_threat: Option<String>,
+    pub tornado_detection: Option<String>,
 }
+
+impl Notification {
+    fn from_alert(key: AlertKey, tier: ThreatTier, alert: &Alert) -> Self {
+        Notification {
+            key,
+            tier,
+            event: alert.properties.event.clone(),
+            headline: alert.properties.headline.clone(),
+            area: alert.properties.area_desc.clone(),
+            instruction: alert.properties.instruction.clone(),
+            damage_threat: alert.damage_threat(),
+            tornado_detection: alert.tornado_detection(),
+        }
+    }
+
+    fn severity_markers(&self) -> SeverityMarkers {
+        (self.damage_threat.clone(), self.tornado_detection.clone())
+    }
+}
+
+/// `damageThreat` and `tornadoDetection`. An SVS that upgrades a warning to a
+/// tornado emergency reuses the ETN, so the key is unchanged and plain dedup
+/// swallows the upgrade. Notification is keyed on these changing too.
+type SeverityMarkers = (Option<String>, Option<String>);
 
 pub fn key_of(alert: &Alert) -> AlertKey {
     match alert.primary_vtec() {
         Some(v) => {
-            let (office, phenomenon, etn) = v.event_key();
-            format!("{office}.{phenomenon}.{etn}")
+            let (office, phenomenon, significance, etn) = v.event_key();
+            format!("{office}.{phenomenon}.{significance}.{etn}")
         }
         None => alert.properties.id.clone().unwrap_or_else(|| {
             format!(
-                "{}|{}",
+                "{}|{}|{}",
                 alert.properties.event,
-                alert.properties.area_desc.as_deref().unwrap_or("")
+                alert.properties.area_desc.as_deref().unwrap_or(""),
+                alert.properties.expires.as_deref().unwrap_or("")
             )
         }),
     }
@@ -43,7 +71,7 @@ pub fn key_of(alert: &Alert) -> AlertKey {
 #[derive(Debug, Default)]
 pub struct AlertState {
     active: HashMap<AlertKey, ActiveAlert>,
-    notified: HashSet<AlertKey>,
+    notified: HashMap<AlertKey, SeverityMarkers>,
     last_success_epoch: Option<u64>,
 }
 
@@ -74,22 +102,20 @@ impl AlertState {
 
             seen.insert(key.clone());
 
-            if !self.notified.contains(&key) {
-                self.notified.insert(key.clone());
-                fresh.push(Notification {
-                    key: key.clone(),
-                    tier,
-                    event: alert.properties.event.clone(),
-                    headline: alert.properties.headline.clone(),
-                    area: alert.properties.area_desc.clone(),
-                });
+            let candidate = Notification::from_alert(key.clone(), tier, &alert);
+            let markers = candidate.severity_markers();
+            let escalated = self.notified.get(&key).is_none_or(|prev| *prev != markers);
+
+            if escalated {
+                self.notified.insert(key.clone(), markers);
+                fresh.push(candidate);
             }
 
             self.active.insert(key, ActiveAlert { alert, tier });
         }
 
         self.active.retain(|k, _| seen.contains(k));
-        self.notified.retain(|k| seen.contains(k));
+        self.notified.retain(|k, _| seen.contains(k));
         fresh
     }
 
@@ -216,6 +242,113 @@ mod tests {
         );
         assert_eq!(out.len(), 2);
         assert_eq!(st.active().count(), 2);
+    }
+
+    fn alert_with_params(event: &str, vtec: &str, extra: &str) -> Alert {
+        let json = format!(
+            r#"{{"features":[{{"geometry":null,"properties":{{"event":"{event}","parameters":{{"VTEC":["{vtec}"]{extra}}}}}}}]}}"#
+        );
+        let parsed: AlertCollection = serde_json::from_str(&json).unwrap();
+        Alert::from_feature(parsed.features.into_iter().next().unwrap())
+    }
+
+    #[test]
+    fn an_upgrade_to_a_tornado_emergency_notifies_again() {
+        let mut st = AlertState::new();
+        let f = filter();
+
+        let first = st.ingest(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f);
+        assert_eq!(first.len(), 1);
+
+        let upgraded = st.ingest(
+            vec![alert_with_params(
+                "Tornado Warning",
+                TOR_CON,
+                r#","damageThreat":["CATASTROPHIC"]"#,
+            )],
+            &f,
+        );
+        assert_eq!(
+            upgraded.len(),
+            1,
+            "an SVS upgrade reuses the ETN, so dedup must not swallow the emergency"
+        );
+        assert_eq!(upgraded[0].damage_threat.as_deref(), Some("CATASTROPHIC"));
+    }
+
+    #[test]
+    fn an_ordinary_continuation_still_does_not_renotify() {
+        let mut st = AlertState::new();
+        let f = filter();
+        st.ingest(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f);
+        let again = st.ingest(vec![alert_with("Tornado Warning", Some(TOR_CON))], &f);
+        assert!(again.is_empty(), "no severity change means no second toast");
+    }
+
+    const TOR_WATCH_SAME_ETN: &str = "/O.NEW.KTLX.TO.A.0012.260727T0600Z-260727T1200Z/";
+    const TOR_WATCH_EXP_SAME_ETN: &str = "/O.EXP.KTLX.TO.A.0012.260727T0600Z-260727T1200Z/";
+
+    #[test]
+    fn a_warning_is_not_suppressed_by_a_watch_sharing_its_etn() {
+        let mut st = AlertState::new();
+        let f = filter();
+
+        let first = st.ingest(vec![alert_with("Tornado Watch", Some(TOR_WATCH_SAME_ETN))], &f);
+        assert_eq!(first.len(), 1, "the watch should notify");
+
+        let second = st.ingest(
+            vec![
+                alert_with("Tornado Watch", Some(TOR_WATCH_SAME_ETN)),
+                alert_with("Tornado Warning", Some(TOR_NEW)),
+            ],
+            &f,
+        );
+        let tiers: Vec<ThreatTier> = second.iter().map(|n| n.tier).collect();
+        assert_eq!(
+            tiers,
+            vec![ThreatTier::Lethal],
+            "the tornado warning must notify even though the watch shares its ETN"
+        );
+    }
+
+    #[test]
+    fn a_watch_does_not_overwrite_a_warning_sharing_its_etn() {
+        let mut st = AlertState::new();
+        let f = filter();
+        st.ingest(
+            vec![
+                alert_with("Tornado Warning", Some(TOR_NEW)),
+                alert_with("Tornado Watch", Some(TOR_WATCH_SAME_ETN)),
+            ],
+            &f,
+        );
+        assert_eq!(st.active().count(), 2);
+        assert_eq!(st.active().map(|a| a.tier).max(), Some(ThreatTier::Lethal));
+    }
+
+    #[test]
+    fn an_expiring_watch_does_not_delete_a_live_warning() {
+        let mut st = AlertState::new();
+        let f = filter();
+        st.ingest(
+            vec![
+                alert_with("Tornado Warning", Some(TOR_NEW)),
+                alert_with("Tornado Watch", Some(TOR_WATCH_SAME_ETN)),
+            ],
+            &f,
+        );
+        st.ingest(
+            vec![
+                alert_with("Tornado Warning", Some(TOR_NEW)),
+                alert_with("Tornado Watch", Some(TOR_WATCH_EXP_SAME_ETN)),
+            ],
+            &f,
+        );
+        assert_eq!(
+            st.active().map(|a| a.tier).max(),
+            Some(ThreatTier::Lethal),
+            "expiring the watch must not retire the warning that shares its ETN"
+        );
     }
 
     #[test]

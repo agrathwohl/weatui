@@ -16,6 +16,7 @@ const PLACES_CSV: &str = include_str!("data/places.csv");
 
 const EARTH_RADIUS_KM: f64 = 6371.0088;
 pub const KM_PER_KNOT_HOUR: f64 = 1.852;
+pub const KM_PER_DEG_LAT: f64 = 111.19492664455873;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Coords {
@@ -123,6 +124,16 @@ pub fn initial_bearing_deg(a: Coords, b: Coords) -> f64 {
 }
 
 /// Smallest absolute separation between two compass bearings, 0..=180.
+/// Move a position by an east/north offset in km.
+pub fn offset_km(from: Coords, east_km: f64, north_km: f64) -> Coords {
+    let lon_scale = KM_PER_DEG_LAT * from.lat.to_radians().cos();
+    Coords {
+        lat: from.lat + north_km / KM_PER_DEG_LAT,
+        lon: from.lon
+            + if lon_scale.abs() < f64::EPSILON { 0.0 } else { east_km / lon_scale },
+    }
+}
+
 pub fn angular_difference_deg(a: f64, b: f64) -> f64 {
     let d = ((a - b) % 360.0 + 360.0) % 360.0;
     if d > 180.0 { 360.0 - d } else { d }

@@ -125,7 +125,7 @@ pub async fn run(cfg: Config, home: Coords, echo_to_stdout: bool) -> Result<()> 
             if echo_to_stdout {
                 eprintln!("weatui: alert feed stale for {}s", elapsed);
             }
-            if let Err(e) = notify::send_stale_warning(elapsed) {
+            if let Err(e) = notify::send_stale_warning(elapsed, &cfg.alerts.scripts) {
                 eprintln!("weatui: stale warning failed: {e:#}");
             }
         }

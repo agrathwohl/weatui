@@ -58,9 +58,13 @@ fn cells_lines(
         } else {
             ' '
         };
+        let track = match c.motion {
+            Some(m) => format!("  \u{2192}{} {:.0} kt", m.compass(), m.speed_kt()),
+            None => String::new(),
+        };
         lines.push(Line::from(Span::styled(
             format!(
-                "{marker}{} {:<8} {:>3.0} km {:<3} {:.0} dBZ",
+                "{marker}{} {:<8} {:>3.0} km {:<3} {:.0} dBZ{track}",
                 glyph::THUNDERSTORM,
                 c.threat.label(),
                 c.distance_km,
@@ -71,16 +75,19 @@ fn cells_lines(
         )));
         if selected == Some(i) {
             let detail_style = Style::default().fg(Color::Rgb(200, 200, 210));
-            let mut motion = Vec::new();
+            let mut diag = Vec::new();
+            if let Some(a) = c.approach {
+                diag.push(format!("nearest {:.0} km in {:.0}m", a.distance_km, a.minutes));
+            }
             if let Some(v) = c.rotation_ms {
-                motion.push(format!("\u{394}v {v:.0} m/s"));
+                diag.push(format!("\u{394}v {v:.0} m/s"));
             }
             if let Some(cc) = c.min_cc {
-                motion.push(format!("cc {cc:.2}"));
+                diag.push(format!("cc {cc:.2}"));
             }
-            if !motion.is_empty() {
+            if !diag.is_empty() {
                 lines.push(Line::from(Span::styled(
-                    format!("  {}", motion.join(" \u{b7} ")),
+                    format!("  {}", diag.join(" \u{b7} ")),
                     detail_style,
                 )));
             }
@@ -439,7 +446,11 @@ mod tests {
 
     fn cell(threat: crate::radar::cells::CellThreat) -> crate::radar::cells::StormCell {
         crate::radar::cells::StormCell {
+            id: 1,
+            motion: None,
+            approach: None,
             centroid: crate::geo::Coords { lat: 36.3, lon: -87.0 },
+            track_point: crate::geo::Coords { lat: 36.3, lon: -87.0 },
             max_dbz: 57.0,
             rotation_ms: Some(46.0),
             min_cc: Some(0.78),
@@ -521,6 +532,22 @@ mod tests {
         assert_eq!(joined.matches("storm cells").count(), 1, "{joined}");
         assert_eq!(joined.matches("74\u{b0}F").count(), 1, "{joined}");
         assert!(joined.contains("FEED STALE"), "{joined}");
+    }
+
+    #[test]
+    fn a_tracked_cell_shows_its_heading_and_its_arrival() {
+        let mut c = cell(crate::radar::cells::CellThreat::Rotation);
+        c.motion =
+            Some(crate::radar::cells::CellMotion { heading_deg: 90.0, speed_kmh: 55.6 });
+        c.approach =
+            Some(crate::radar::cells::Approach { minutes: 18.0, distance_km: 3.0 });
+        let joined: Vec<String> = cells_lines(&[c], Some(0))
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        let joined = joined.join("\n");
+        assert!(joined.contains("\u{2192}E 30 kt"), "{joined}");
+        assert!(joined.contains("nearest 3 km in 18m"), "{joined}");
     }
 
     #[test]

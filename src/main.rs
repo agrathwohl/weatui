@@ -68,8 +68,13 @@ async fn main() -> Result<()> {
 
     let cfg = config::Config::load()?;
     let home = resolve_home(&cfg)?;
+
+    if let Err(e) = notify::preflight() {
+        eprintln!("weatui: {e:#}");
+    }
+
     if mode == Mode::Daemon {
-        daemon::run(cfg, home, false).await
+        daemon::run(cfg, home, true).await
     } else {
         tui::run(cfg, home).await
     }

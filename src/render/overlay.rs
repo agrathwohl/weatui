@@ -120,6 +120,39 @@ impl PixelOverlay {
         }
     }
 
+    /// A tail from the cell to where its track puts it `minutes` from now.
+    ///
+    /// Pixel space throughout: the viewport already knows km per pixel, so
+    /// projecting the far end geographically would only add a second way to
+    /// be wrong about it.
+    pub fn draw_cell_motion(
+        &mut self,
+        at: Coords,
+        motion: crate::radar::cells::CellMotion,
+        minutes: f64,
+        viewport: &Viewport,
+        rgb: Rgb,
+    ) {
+        let kpp = viewport.km_per_pixel();
+        if kpp <= 0.0 {
+            return;
+        }
+        let length_px = motion.speed_kmh * (minutes / 60.0) / kpp;
+        if !length_px.is_finite() || length_px < 2.0 {
+            return;
+        }
+        let (cx, cy) = viewport.project_to_nearest_pixel(at);
+        let theta = motion.heading_deg.to_radians();
+        self.draw_line(
+            (cx, cy),
+            (
+                cx + (length_px * theta.sin()).round() as i64,
+                cy - (length_px * theta.cos()).round() as i64,
+            ),
+            rgb,
+        );
+    }
+
     pub fn draw_distance_rings(
         &mut self,
         centre: Coords,

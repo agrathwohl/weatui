@@ -117,8 +117,19 @@ impl VtecCode {
     }
 
     /// Identity for deduplication across repeated polls.
-    pub fn event_key(&self) -> (String, String, u16) {
-        (self.office.clone(), self.phenomenon.clone(), self.etn)
+    ///
+    /// DO NOT drop `significance` to "simplify" this tuple. ETNs are sequenced
+    /// per office per phenomenon per significance and all restart at 1 each
+    /// January, so `TO.A.0012` and `TO.W.0012` are one office's live watch and
+    /// live warning. Collapsing them onto one key makes the first one seen
+    /// suppress the other for the life of the event.
+    pub fn event_key(&self) -> (String, String, char, u16) {
+        (
+            self.office.clone(),
+            self.phenomenon.clone(),
+            self.significance,
+            self.etn,
+        )
     }
 
     /// NWS products may carry several VTEC strings, including H-VTEC for
@@ -184,6 +195,13 @@ mod tests {
         let new = VtecCode::parse("/O.NEW.KTLX.TO.W.0012.260727T0700Z-260727T0730Z/").unwrap();
         let con = VtecCode::parse("/O.CON.KTLX.TO.W.0012.260727T0705Z-260727T0730Z/").unwrap();
         assert_eq!(new.event_key(), con.event_key());
+    }
+
+    #[test]
+    fn a_watch_and_a_warning_sharing_an_etn_have_different_keys() {
+        let watch = VtecCode::parse("/O.NEW.KTLX.TO.A.0012.260727T0600Z-260727T1200Z/").unwrap();
+        let warning = VtecCode::parse("/O.NEW.KTLX.TO.W.0012.260727T0700Z-260727T0730Z/").unwrap();
+        assert_ne!(watch.event_key(), warning.event_key());
     }
 
     #[test]

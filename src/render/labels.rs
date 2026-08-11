@@ -140,7 +140,11 @@ mod tests {
 
     fn storm(hazards: Vec<Hazard>, at: Coords) -> StormCell {
         StormCell {
+            id: 1,
+            motion: None,
+            approach: None,
             centroid: at,
+            track_point: at,
             max_dbz: 50.0,
             rotation_ms: None,
             min_cc: None,

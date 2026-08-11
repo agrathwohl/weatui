@@ -14,7 +14,7 @@
 use crate::geo::{Coords, KM_PER_KNOT_HOUR, angular_difference_deg, haversine_km,
                  initial_bearing_deg};
 use anyhow::{Result, bail};
-use chrono::{DateTime, Duration, FixedOffset};
+use chrono::{DateTime, Duration, FixedOffset, Utc};
 
 #[derive(Debug, Clone)]
 pub struct StormMotion {
@@ -86,6 +86,14 @@ impl StormMotion {
     /// it. Linear extrapolation of a single vector: real storms turn, so this is
     /// an estimate rather than a promise.
     pub fn eta_to(&self, target: Coords) -> Option<Duration> {
+        self.eta_to_at(target, chrono::Utc::now())
+    }
+
+    /// The track is where the storm was at `observed_at`, not where it is now,
+    /// so time elapsed since then has already been spent travelling and must
+    /// come off the estimate. Skipping it makes every arrival read late by
+    /// exactly the vector's age, which is the reassuring direction.
+    pub fn eta_to_at(&self, target: Coords, now: DateTime<Utc>) -> Option<Duration> {
         if self.speed_kt <= 0.0 {
             return None;
         }
@@ -97,9 +105,12 @@ impl StormMotion {
         }
         let along_track_km = distance_km * offset_deg.to_radians().cos();
         let hours = along_track_km / (self.speed_kt * KM_PER_KNOT_HOUR);
-        Duration::try_seconds((hours * 3600.0).round() as i64)
-    }
+        let from_observation = Duration::try_seconds((hours * 3600.0).round() as i64)?;
 
+        let age = now.signed_duration_since(self.observed_at.to_utc());
+        let age = age.max(Duration::zero());
+        Some((from_observation - age).max(Duration::zero()))
+    }
 }
 
 #[cfg(test)]
@@ -138,9 +149,52 @@ mod tests {
         let raw = "2026-07-27T07:00:00-00:00...storm...180DEG...30KT...34.0994,-97.0";
         let m = StormMotion::parse(raw).unwrap();
         let target = Coords { lat: 35.0, lon: -97.0 };
-        let eta = m.eta_to(target).expect("storm is closing");
+        let eta = m
+            .eta_to_at(target, m.observed_at.to_utc())
+            .expect("storm is closing");
         let minutes = eta.num_seconds() as f64 / 60.0;
         assert!((minutes - 108.0).abs() < 1.0, "expected ~108 min, got {minutes}");
+    }
+
+    #[test]
+    fn an_aged_vector_shortens_the_eta_by_exactly_its_age() {
+        let raw = "2026-07-27T07:00:00-00:00...storm...180DEG...30KT...34.0994,-97.0";
+        let m = StormMotion::parse(raw).unwrap();
+        let target = Coords { lat: 35.0, lon: -97.0 };
+
+        let fresh = m.eta_to_at(target, m.observed_at.to_utc()).unwrap();
+        let aged = m
+            .eta_to_at(target, m.observed_at.to_utc() + Duration::minutes(15))
+            .unwrap();
+
+        assert_eq!(
+            fresh - aged,
+            Duration::minutes(15),
+            "a 15-minute-old vector must report an arrival 15 minutes sooner"
+        );
+    }
+
+    #[test]
+    fn a_vector_older_than_the_eta_reports_zero_not_a_positive_number() {
+        let raw = "2026-07-27T07:00:00-00:00...storm...180DEG...30KT...34.0994,-97.0";
+        let m = StormMotion::parse(raw).unwrap();
+        let target = Coords { lat: 35.0, lon: -97.0 };
+        let eta = m
+            .eta_to_at(target, m.observed_at.to_utc() + Duration::hours(6))
+            .expect("still closing along track");
+        assert_eq!(eta, Duration::zero(), "an overdue storm must not report time remaining");
+    }
+
+    #[test]
+    fn a_clock_behind_the_vector_does_not_inflate_the_eta() {
+        let raw = "2026-07-27T07:00:00-00:00...storm...180DEG...30KT...34.0994,-97.0";
+        let m = StormMotion::parse(raw).unwrap();
+        let target = Coords { lat: 35.0, lon: -97.0 };
+        let skewed = m
+            .eta_to_at(target, m.observed_at.to_utc() - Duration::hours(1))
+            .unwrap();
+        let fresh = m.eta_to_at(target, m.observed_at.to_utc()).unwrap();
+        assert_eq!(skewed, fresh);
     }
 
     #[test]

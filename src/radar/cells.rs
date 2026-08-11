@@ -2,9 +2,15 @@
 //! connected cores, then interrogate each core across every moment the
 //! volume carries. Warnings remain the authority; this points at the blob
 //! that deserves attention before one exists.
+//!
+//! [`scan`] sees one volume and has no memory. [`CellTracker`] supplies the
+//! memory: it associates each volume's detections with the previous one's, so
+//! a core keeps an identity while it lives, carries a measured translation,
+//! and can say when it reaches the user.
 
 use crate::geo::Coords;
 use crate::radar::{RadarField, RadarProduct};
+use chrono::{DateTime, Utc};
 
 /// Reflectivity that makes a sample part of a storm core. 40 dBZ is
 /// convective rain; stratiform and bright-band echo stay below it.
@@ -41,6 +47,22 @@ const LOCAL_RADIUS_CELLS: i64 = 3;
 const ROTATION_MAX_RANGE_KM: f64 = 150.0;
 const HAIL_ECHO_TOP_KM: f32 = 14.0;
 const INTENSE_DBZ: f32 = 55.0;
+/// Tracking follows the high-reflectivity core rather than the 40 dBZ
+/// envelope around it. A supercell regenerating on its upwind flank grows
+/// backwards about as fast as it advances, so the envelope's centroid creeps
+/// while the storm itself moves; the core inside it travels with the storm.
+/// Measured on 2013-05-20 KTLX, the envelope put the Moore tornado at 5-11 kt
+/// against an actual translation near 30 kt.
+const CORE_DBZ: f32 = 50.0;
+/// Do not narrow this to a band below each cell's own peak. Tried on the
+/// same KTLX sequence, tracking the top 10 dB of a 68 dBZ supercell swung the
+/// heading through 180 degrees: the peak region pulses around inside a storm
+/// independently of where the storm is going, and too few samples make its
+/// centre jitter. A fixed floor understates the speed; a narrow one invents
+/// a direction, which is worse.
+///
+/// Fewer core samples than this is a peak, not a body to take a centre of.
+const MIN_CORE_SAMPLES: usize = 3;
 
 /// Hazard letters for the map, worst first. Wind is a radial-velocity proxy
 /// for damaging gusts; Lightning is a deep-updraft proxy (charge separation
@@ -114,9 +136,46 @@ impl CellThreat {
     }
 }
 
+/// A cell's translation across volumes.
+///
+/// `heading_deg` is where the storm is GOING, clockwise from north. NWS storm
+/// motion text states the direction a storm comes FROM; the two are 180 apart
+/// and confusing them reports an inbound storm as departing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CellMotion {
+    pub heading_deg: f64,
+    pub speed_kmh: f64,
+}
+
+impl CellMotion {
+    pub fn speed_kt(self) -> f64 {
+        self.speed_kmh / crate::geo::KM_PER_KNOT_HOUR
+    }
+
+    pub fn compass(self) -> &'static str {
+        crate::geo::compass_16(self.heading_deg as f32)
+    }
+}
+
+/// Where the current track puts the cell at its nearest point to home.
+///
+/// A cell already past its nearest point gets none: it is leaving.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Approach {
+    pub minutes: f64,
+    pub distance_km: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct StormCell {
+    /// Stable while the track lives. Zero until [`CellTracker::track`] runs:
+    /// [`scan`] sees a single volume and cannot know what came before.
+    pub id: u32,
     pub centroid: Coords,
+    /// The point the tracker follows: the core's centre when the cell has
+    /// one, else [`Self::centroid`]. Distance and bearing stay on the
+    /// centroid, which is the blob actually drawn on the map.
+    pub track_point: Coords,
     pub max_dbz: f32,
     pub rotation_ms: Option<f32>,
     pub min_cc: Option<f32>,
@@ -126,6 +185,10 @@ pub struct StormCell {
     pub bearing: &'static str,
     pub threat: CellThreat,
     pub hazards: Vec<Hazard>,
+    /// `None` until the track has two fixes far enough apart in time to
+    /// measure against.
+    pub motion: Option<CellMotion>,
+    pub approach: Option<Approach>,
 }
 
 pub(crate) struct CellStats {
@@ -201,6 +264,9 @@ pub fn scan(field: &dyn RadarField, site: Coords, home: Coords) -> Vec<StormCell
 
         let mut weight = 0.0f64;
         let (mut wlat, mut wlon) = (0.0f64, 0.0f64);
+        let mut core_weight = 0.0f64;
+        let (mut core_lat, mut core_lon) = (0.0f64, 0.0f64);
+        let mut core_samples = 0usize;
         let mut max_dbz = f32::MIN;
         let mut velocity = std::collections::HashMap::new();
         let mut cc_at = std::collections::HashMap::new();
@@ -276,13 +342,31 @@ pub fn scan(field: &dyn RadarField, site: Coords, home: Coords) -> Vec<StormCell
             max_vil,
             max_echo_top_km: max_top,
         };
+        for &i in &members {
+            let Some(z) = dbz[i].filter(|v| *v >= CORE_DBZ) else { continue };
+            let p = at(i % n, i / n);
+            core_weight += z as f64;
+            core_lat += z as f64 * p.lat;
+            core_lon += z as f64 * p.lon;
+            core_samples += 1;
+        }
+
         let centroid = Coords { lat: wlat / weight, lon: wlon / weight };
+        let track_point = if core_samples >= MIN_CORE_SAMPLES && core_weight > 0.0 {
+            Coords { lat: core_lat / core_weight, lon: core_lon / core_weight }
+        } else {
+            centroid
+        };
         let distance_km = crate::geo::haversine_km(home, centroid);
         if distance_km > MAX_CELL_DISTANCE_KM {
             continue;
         }
         cells.push(StormCell {
+            id: 0,
+            motion: None,
+            approach: None,
             centroid,
+            track_point,
             max_dbz,
             rotation_ms: stats.rotation_ms,
             min_cc: stats.min_cc,
@@ -316,6 +400,188 @@ pub fn scan(field: &dyn RadarField, site: Coords, home: Coords) -> Vec<StormCell
         }
     }
     cells
+}
+
+/// The fastest a storm core plausibly translates. Above ~65 kt, two cores in
+/// consecutive volumes are two storms rather than one that moved.
+const MAX_TRACK_SPEED_KMH: f64 = 120.0;
+/// Centroid jitter budget. The lattice is ~2.2 km and a growing core's
+/// reflectivity-weighted centre wanders inside the blob even when the storm
+/// itself is stationary.
+const TRACK_SLACK_KM: f64 = 6.0;
+/// A longer gap than this (dead feed, laptop asleep) makes association
+/// guesswork, so every cell starts a fresh track instead of inheriting an
+/// identity it may not deserve.
+const MAX_TRACK_GAP_MIN: f64 = 20.0;
+/// Volumes closer together than this quantise badly: one lattice step over
+/// one minute reads as 130 km/h of pure grid noise. NEXRAD VCPs run 4-6
+/// minutes, so this only rejects repeats of the same volume.
+const MIN_MOTION_GAP_MIN: f64 = 1.5;
+/// Weight on the newest fix. Halving the correction each volume keeps a
+/// turning storm current without letting one jittery centroid swing the
+/// vector across the compass.
+const MOTION_SMOOTHING: f64 = 0.5;
+/// Storms do not hold a heading long enough for an arrival further out than
+/// this to mean anything.
+const MAX_ETA_MINUTES: f64 = 120.0;
+/// Below this the vector is centroid noise, not translation.
+const MIN_MOTION_KMH: f64 = 3.0;
+
+/// East/north offset in km, from great-circle distance and bearing rather
+/// than a projection constant so it holds at any latitude.
+fn displacement_km(from: Coords, to: Coords) -> (f64, f64) {
+    let d = crate::geo::haversine_km(from, to);
+    let b = crate::geo::initial_bearing_deg(from, to).to_radians();
+    (d * b.sin(), d * b.cos())
+}
+
+fn motion_from((east, north): (f64, f64)) -> Option<CellMotion> {
+    let speed_kmh = east.hypot(north);
+    if speed_kmh < MIN_MOTION_KMH {
+        return None;
+    }
+    Some(CellMotion {
+        heading_deg: east.atan2(north).to_degrees().rem_euclid(360.0),
+        speed_kmh,
+    })
+}
+
+/// Closest point of approach: with `r` pointing from the cell to home and
+/// `v` the cell's velocity, the track is nearest at `t = (r.v) / |v|^2`. A
+/// non-positive `t` puts that moment in the past, so the cell is receding.
+fn approach(centroid: Coords, (vx, vy): (f64, f64), home: Coords) -> Option<Approach> {
+    let speed_sq = vx * vx + vy * vy;
+    if speed_sq < MIN_MOTION_KMH * MIN_MOTION_KMH {
+        return None;
+    }
+    let (rx, ry) = displacement_km(centroid, home);
+    let hours = (rx * vx + ry * vy) / speed_sq;
+    let minutes = hours * 60.0;
+    if minutes <= 0.0 || minutes > MAX_ETA_MINUTES {
+        return None;
+    }
+    Some(Approach { minutes, distance_km: (rx - vx * hours).hypot(ry - vy * hours) })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Fix {
+    id: u32,
+    centroid: Coords,
+    /// East/north km/h, smoothed across volumes.
+    velocity: Option<(f64, f64)>,
+}
+
+/// Carries cell identity between volumes.
+///
+/// One instance per radar feed, fed every volume in chronological order.
+/// Feeding it out of order or skipping volumes costs motion accuracy but
+/// cannot corrupt it: a gap wider than [`MAX_TRACK_GAP_MIN`] drops the old
+/// tracks rather than inventing an implausible jump.
+#[derive(Debug, Default)]
+pub struct CellTracker {
+    next_id: u32,
+    previous: Vec<Fix>,
+    last_at: Option<DateTime<Utc>>,
+}
+
+impl CellTracker {
+    /// Assign identities to one volume's detections and measure their motion.
+    ///
+    /// Association is greedy nearest-first within a gate that widens with the
+    /// time since the last volume. Greedy is enough at [`MAX_CELLS`] cells:
+    /// the pathological case for it needs two cores closer to each other than
+    /// to their own previous fixes, which is a merge, and a merge has no
+    /// correct answer to lose.
+    pub fn track(
+        &mut self,
+        mut cells: Vec<StormCell>,
+        at: DateTime<Utc>,
+        home: Coords,
+    ) -> Vec<StormCell> {
+        let gap_min = self
+            .last_at
+            .map_or(f64::INFINITY, |p| (at - p).num_milliseconds() as f64 / 60_000.0);
+        // A first volume gives an infinite gap, which must not become an
+        // infinite gate: clearing the tracks and the gate together keeps the
+        // two from ever disagreeing about whether association is allowed.
+        let usable = (0.0..=MAX_TRACK_GAP_MIN).contains(&gap_min);
+        if !usable {
+            self.previous.clear();
+        }
+        let hours = if usable { gap_min / 60.0 } else { 0.0 };
+        let gate_km = if usable { MAX_TRACK_SPEED_KMH * hours + TRACK_SLACK_KM } else { 0.0 };
+
+        // Measure from where the track says the storm should be, not from
+        // where it last was. In a crowded field the difference decides which
+        // core a match belongs to: an unaimed gate hands the identity to
+        // whichever blob happens to be nearest the stale position.
+        let mut pairs: Vec<(f64, usize, usize)> = Vec::new();
+        for (ci, cell) in cells.iter().enumerate() {
+            for (pi, prev) in self.previous.iter().enumerate() {
+                let expected = match prev.velocity {
+                    Some((e, n)) => crate::geo::offset_km(prev.centroid, e * hours, n * hours),
+                    None => prev.centroid,
+                };
+                let d = crate::geo::haversine_km(expected, cell.track_point);
+                if d <= gate_km {
+                    pairs.push((d, ci, pi));
+                }
+            }
+        }
+        pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+        let mut matched = vec![None; cells.len()];
+        let mut claimed = vec![false; self.previous.len()];
+        for (_, ci, pi) in pairs {
+            if matched[ci].is_none() && !claimed[pi] {
+                matched[ci] = Some(self.previous[pi]);
+                claimed[pi] = true;
+            }
+        }
+
+        let mut fixes = Vec::with_capacity(cells.len());
+        for (cell, prev) in cells.iter_mut().zip(matched) {
+            let id = match prev {
+                Some(p) => p.id,
+                None => {
+                    self.next_id += 1;
+                    self.next_id
+                }
+            };
+            let velocity = match prev {
+                Some(p) if gap_min >= MIN_MOTION_GAP_MIN => {
+                    let (east, north) = displacement_km(p.centroid, cell.track_point);
+                    let fresh = (east / hours, north / hours);
+                    // The gate stretches by TRACK_SLACK_KM to tolerate centroid
+                    // jitter, and across a four-minute volume that slack alone
+                    // implies 90 km/h. Association may spend it; a velocity
+                    // may not, or the readout invents storms moving at 110 kt.
+                    if fresh.0.hypot(fresh.1) > MAX_TRACK_SPEED_KMH {
+                        p.velocity
+                    } else {
+                        Some(match p.velocity {
+                            Some((pe, pn)) => (
+                                pe + (fresh.0 - pe) * MOTION_SMOOTHING,
+                                pn + (fresh.1 - pn) * MOTION_SMOOTHING,
+                            ),
+                            None => fresh,
+                        })
+                    }
+                }
+                Some(p) => p.velocity,
+                None => None,
+            };
+
+            cell.id = id;
+            cell.motion = velocity.and_then(motion_from);
+            cell.approach = velocity.and_then(|v| approach(cell.track_point, v, home));
+            fixes.push(Fix { id, centroid: cell.track_point, velocity });
+        }
+
+        self.previous = fixes;
+        self.last_at = Some(at);
+        cells
+    }
 }
 
 #[cfg(test)]
@@ -565,6 +831,226 @@ mod tests {
             CellThreat::Rotation,
             "the same couplet at 78 km is resolvable and must still register"
         );
+    }
+
+    fn at_minute(m: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(m * 60, 0).unwrap()
+    }
+
+    fn core_at(c: Coords) -> impl RadarField {
+        FnField(move |p, product| match product {
+            RadarProduct::Reflectivity if disk(c, 10.0, p) => Some(50.0),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_core_keeps_its_identity_and_gains_a_measured_motion() {
+        let mut tracker = CellTracker::default();
+        let start = Coords { lat: 36.1, lon: -87.2 };
+        let first = tracker.track(scan(&core_at(start), SITE, HOME), at_minute(0), HOME);
+        assert_eq!(first.len(), 1);
+        assert!(first[0].motion.is_none(), "one fix cannot show a motion");
+
+        let moved = Coords { lat: start.lat, lon: start.lon + 0.05 };
+        let second = tracker.track(scan(&core_at(moved), SITE, HOME), at_minute(5), HOME);
+        assert_eq!(second[0].id, first[0].id, "the same storm must keep its id");
+        let m = second[0].motion.expect("two fixes measure a motion");
+        assert!(
+            crate::geo::angular_difference_deg(m.heading_deg, 90.0) < 15.0,
+            "the core moved due east, heading reads {}",
+            m.heading_deg
+        );
+        assert!((m.speed_kmh - 54.0).abs() < 15.0, "{}", m.speed_kmh);
+    }
+
+    /// Ranking is rebuilt every volume. Identity must survive that, or a
+    /// selection silently slides onto a different storm.
+    #[test]
+    fn a_ranking_change_does_not_move_an_identity_to_another_storm() {
+        let west = Coords { lat: 36.1, lon: -87.3 };
+        let east = Coords { lat: 36.1, lon: -86.7 };
+        let pair = |west_dbz: f32, east_dbz: f32| {
+            FnField(move |p, product| match product {
+                RadarProduct::Reflectivity if disk(west, 10.0, p) => Some(west_dbz),
+                RadarProduct::Reflectivity if disk(east, 10.0, p) => Some(east_dbz),
+                _ => None,
+            })
+        };
+        let westward = |c: &&StormCell| c.centroid.lon < -87.0;
+        let eastward = |c: &&StormCell| c.centroid.lon > -87.0;
+
+        let mut tracker = CellTracker::default();
+        let first = tracker.track(scan(&pair(58.0, 45.0), SITE, HOME), at_minute(0), HOME);
+        assert_eq!(first.len(), 2);
+        let west_id = first.iter().find(westward).unwrap().id;
+        let east_id = first.iter().find(eastward).unwrap().id;
+        assert_ne!(west_id, east_id);
+
+        let second = tracker.track(scan(&pair(45.0, 58.0), SITE, HOME), at_minute(5), HOME);
+        assert_eq!(second.iter().find(westward).unwrap().id, west_id);
+        assert_eq!(second.iter().find(eastward).unwrap().id, east_id);
+        assert_ne!(first[0].id, second[0].id, "the top row is now a different storm");
+    }
+
+    #[test]
+    fn a_jump_no_storm_could_make_starts_a_new_track() {
+        let mut tracker = CellTracker::default();
+        let first =
+            tracker.track(scan(&core_at(Coords { lat: 36.1, lon: -87.3 }), SITE, HOME),
+                at_minute(0), HOME);
+        // 0.5 degrees of longitude in five minutes is over 500 km/h.
+        let second =
+            tracker.track(scan(&core_at(Coords { lat: 36.1, lon: -86.8 }), SITE, HOME),
+                at_minute(5), HOME);
+        assert_ne!(second[0].id, first[0].id);
+        assert!(second[0].motion.is_none(), "a fresh track has nothing to measure from");
+    }
+
+    /// Position alone does not prove identity. After a long outage the core
+    /// sitting where the old one was may be an entirely different storm.
+    #[test]
+    fn a_long_silence_breaks_the_track_even_where_nothing_moved() {
+        let c = Coords { lat: 36.1, lon: -87.2 };
+        let mut tracker = CellTracker::default();
+        let first = tracker.track(scan(&core_at(c), SITE, HOME), at_minute(0), HOME);
+        let second = tracker.track(scan(&core_at(c), SITE, HOME), at_minute(45), HOME);
+        assert_ne!(second[0].id, first[0].id);
+    }
+
+    #[test]
+    fn approach_times_a_closing_storm_and_ignores_a_departing_one() {
+        let far = Coords { lat: 36.30, lon: -87.0 };
+        let near = Coords { lat: 36.25, lon: -87.0 };
+
+        let mut closing = CellTracker::default();
+        closing.track(scan(&core_at(far), SITE, HOME), at_minute(0), HOME);
+        let inbound = closing.track(scan(&core_at(near), SITE, HOME), at_minute(5), HOME);
+        let a = inbound[0].approach.expect("a storm heading at home has an arrival");
+        assert!(a.distance_km < 8.0, "a direct hit reads near zero, got {}", a.distance_km);
+        assert!((a.minutes - 50.0).abs() < 15.0, "{}", a.minutes);
+
+        let mut leaving = CellTracker::default();
+        leaving.track(scan(&core_at(near), SITE, HOME), at_minute(0), HOME);
+        let outbound = leaving.track(scan(&core_at(far), SITE, HOME), at_minute(5), HOME);
+        assert!(
+            outbound[0].approach.is_none(),
+            "a storm already receding has no arrival to report"
+        );
+    }
+
+    /// Polling can hand back the volume it just delivered. A zero-length step
+    /// must not divide the motion by it.
+    #[test]
+    fn a_repeated_volume_keeps_the_track_and_its_motion_intact() {
+        let a = Coords { lat: 36.1, lon: -87.2 };
+        let b = Coords { lat: 36.1, lon: -87.15 };
+        let mut tracker = CellTracker::default();
+        tracker.track(scan(&core_at(a), SITE, HOME), at_minute(0), HOME);
+        let moved = tracker.track(scan(&core_at(b), SITE, HOME), at_minute(5), HOME);
+        let repeat = tracker.track(scan(&core_at(b), SITE, HOME), at_minute(5), HOME);
+        assert_eq!(repeat[0].id, moved[0].id);
+        assert_eq!(
+            repeat[0].motion, moved[0].motion,
+            "a repeat teaches nothing and must change nothing"
+        );
+    }
+
+    /// Replays the 2013-05-20 Moore, OK supercell out of the S3 archive.
+    ///
+    /// Synthetic disks translate rigidly and never change shape. Only real
+    /// echo shows whether association survives a core that grows, sheds
+    /// flanking cells and reforms between volumes, which is the whole claim
+    /// tracking makes. Hits the network, so it stays out of the default run.
+    /// `cargo test moore -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn tracking_holds_across_the_moore_2013_supercell() {
+        use chrono::Timelike;
+        use std::collections::HashMap;
+
+        let date = chrono::NaiveDate::from_ymd_opt(2013, 5, 20).unwrap();
+        let site = crate::geo::radar_site_by_id("KTLX").expect("KTLX is in the table");
+        let home = Coords { lat: 35.3395, lon: -97.4867 };
+
+        // The EF5 was on the ground 19:56-20:35Z.
+        let ids: Vec<_> = crate::radar::fetch::archive_ids_on("KTLX", date)
+            .await
+            .expect("list the archive")
+            .into_iter()
+            .filter(|id| {
+                id.date_time().is_some_and(|t| {
+                    (19 * 60 + 50..=20 * 60 + 30).contains(&(t.hour() * 60 + t.minute()))
+                })
+            })
+            .collect();
+        assert!(ids.len() >= 5, "expected a run of volumes, got {}", ids.len());
+
+        let mut tracker = CellTracker::default();
+        let mut lives: HashMap<u32, Vec<CellMotion>> = HashMap::new();
+        let mut volumes = 0usize;
+
+        for id in ids {
+            let (at, field) =
+                crate::radar::fetch::archived_field(id).await.expect("decode volume");
+            let cells = tracker.track(scan(&field, site.coords, home), at, home);
+            volumes += 1;
+            eprintln!("--- {at}  {} cells", cells.len());
+            for c in &cells {
+                eprintln!(
+                    "  #{:<3} {:<9} {:>3.0} km {:<3} {:>3.0} dBZ  {:<12} {}",
+                    c.id,
+                    c.threat.label(),
+                    c.distance_km,
+                    c.bearing,
+                    c.max_dbz,
+                    match c.motion {
+                        Some(m) => format!("{} {:.0} kt", m.compass(), m.speed_kt()),
+                        None => "-".to_string(),
+                    },
+                    match c.approach {
+                        Some(a) => format!("nearest {:.0} km in {:.0}m", a.distance_km, a.minutes),
+                        None => String::new(),
+                    }
+                );
+                lives.entry(c.id).or_default().extend(c.motion);
+            }
+        }
+
+        let (id, motions) = lives
+            .iter()
+            .max_by_key(|(_, m)| m.len())
+            .expect("the outbreak produced at least one track");
+        eprintln!("longest track #{id}: {} volumes with motion, of {volumes}", motions.len());
+
+        assert!(
+            motions.len() >= 3,
+            "no cell held an identity across the sequence; longest was {} of {volumes} volumes",
+            motions.len()
+        );
+
+        let headings: Vec<f64> = motions.iter().map(|m| m.heading_deg).collect();
+        let spread = headings
+            .iter()
+            .flat_map(|a| headings.iter().map(move |b| crate::geo::angular_difference_deg(*a, *b)))
+            .fold(0.0f64, f64::max);
+        eprintln!("headings {headings:?} spread {spread:.0} deg");
+        assert!(spread < 60.0, "a tracked supercell should not swing {spread:.0} deg");
+
+        // No floor: the centroid of a large blob genuinely creeps when the
+        // storm regenerates upwind as fast as it advances. The cap is the
+        // claim worth holding, because exceeding it means the track jumped
+        // to a different cell.
+        for (id, motions) in &lives {
+            for m in motions {
+                assert!(
+                    m.speed_kmh <= MAX_TRACK_SPEED_KMH,
+                    "track #{id} reported {:.0} kt, above the {:.0} kt cap",
+                    m.speed_kt(),
+                    MAX_TRACK_SPEED_KMH / crate::geo::KM_PER_KNOT_HOUR
+                );
+            }
+        }
     }
 
     #[test]

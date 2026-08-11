@@ -30,6 +30,10 @@ use std::time::{Duration, Instant};
 const MIN_SPAN_KM: f64 = 20.0;
 const MAX_SPAN_KM: f64 = 900.0;
 const DEFAULT_SPAN_KM: f64 = 260.0;
+/// How far ahead a cell's motion tail is drawn. Half an hour is long enough
+/// to read a heading off the map and short enough that the storm is still
+/// plausibly on it.
+const MOTION_TAIL_MINUTES: f64 = 30.0;
 const HUD_WIDTH: u16 = 34;
 /// Fetched forecast steps plus the motion-interpolated fill frames between
 /// them: 18 hourly steps synthesize 3 extras per gap.
@@ -73,7 +77,7 @@ const HELP: &str = "\
    4 5 6 7    toggle: velocity / debris CC / ZDR / spec width
 
  CELLS
-   n N        cycle storm cells (map follows)
+   n N        cycle storm cells (map tracks the storm)
    t          toggle hazard letters (T H W L R S)
 
  MAP LAYER
@@ -233,7 +237,13 @@ pub struct App {
     obs_history: Vec<crate::conditions::Conditions>,
     hourly: Vec<crate::conditions::HourlyForecast>,
     cells: Vec<crate::radar::cells::StormCell>,
-    selected_cell: Option<usize>,
+    /// Track id, not a list index: the ranking is rebuilt every volume, so an
+    /// index would silently slide onto a different storm.
+    selected: Option<u32>,
+    /// Where the map was last parked on the selection. While the viewport
+    /// still sits there the map follows the storm; once the user pans, it
+    /// stops equalling this and following ends on its own.
+    locked_on: Option<Coords>,
     show_help: bool,
     quit: bool,
     status: String,
@@ -276,7 +286,8 @@ impl App {
             obs_history: Vec::new(),
             hourly: Vec::new(),
             cells: Vec::new(),
-            selected_cell: None,
+            selected: None,
+            locked_on: None,
             show_help: false,
             quit: false,
             status: format!(
@@ -320,12 +331,12 @@ impl App {
                 self.status = "no storm cells detected".to_string();
             }
             Action::CellNext => {
-                let next = self.selected_cell.map_or(0, |i| (i + 1) % self.cells.len());
+                let next = self.selected_index().map_or(0, |i| (i + 1) % self.cells.len());
                 self.select_cell(next);
             }
             Action::CellPrev => {
                 let len = self.cells.len();
-                let prev = self.selected_cell.map_or(len - 1, |i| (i + len - 1) % len);
+                let prev = self.selected_index().map_or(len - 1, |i| (i + len - 1) % len);
                 self.select_cell(prev);
             }
             Action::SelectProduct(i) => {
@@ -459,9 +470,40 @@ impl App {
         }
     }
 
+    fn selected_index(&self) -> Option<usize> {
+        let id = self.selected?;
+        self.cells.iter().position(|c| c.id == id)
+    }
+
     fn select_cell(&mut self, index: usize) {
-        self.selected_cell = Some(index);
-        self.viewport.centre = self.cells[index].centroid;
+        let cell = &self.cells[index];
+        self.selected = Some(cell.id);
+        self.viewport.centre = cell.centroid;
+        self.locked_on = Some(cell.centroid);
+    }
+
+    /// Take on a new volume's cells, keeping the selection pinned to the same
+    /// storm rather than the same row.
+    fn absorb_cells(&mut self, cells: Vec<crate::radar::cells::StormCell>) {
+        let following = self.locked_on == Some(self.viewport.centre);
+        self.cells = cells;
+        match self.selected_index() {
+            Some(i) if following => {
+                let centroid = self.cells[i].centroid;
+                self.viewport.centre = centroid;
+                self.locked_on = Some(centroid);
+            }
+            Some(_) => {}
+            None => {
+                // Not necessarily dissipated: it may have drifted out of the
+                // home radius or been ranked out of the list during an
+                // outbreak. The readout must not claim to know which.
+                if self.selected.take().is_some() {
+                    self.status = "tracked cell no longer listed".to_string();
+                }
+                self.locked_on = None;
+            }
+        }
     }
 
     /// The current-conditions block always shows now; this picks what the
@@ -545,17 +587,23 @@ impl App {
             .ring
             .current()
             .is_some_and(|f| !f.projected && Some(f.captured_at) == newest_observed);
+        let selected = self.selected_index();
         for (i, cell) in self.cells.iter().enumerate().filter(|_| on_live_frame) {
-            overlay.draw_cell_marker(
-                cell.centroid,
-                &self.viewport,
-                if self.selected_cell == Some(i) {
-                    HOME_MARKER
-                } else {
-                    crate::render::hud::threat_rgb(cell.threat)
-                },
-                self.selected_cell == Some(i),
-            );
+            let rgb = if selected == Some(i) {
+                HOME_MARKER
+            } else {
+                crate::render::hud::threat_rgb(cell.threat)
+            };
+            overlay.draw_cell_marker(cell.centroid, &self.viewport, rgb, selected == Some(i));
+            if let Some(motion) = cell.motion {
+                overlay.draw_cell_motion(
+                    cell.centroid,
+                    motion,
+                    MOTION_TAIL_MINUTES,
+                    &self.viewport,
+                    rgb,
+                );
+            }
         }
         overlay.draw_home(self.home, &self.viewport, HOME_MARKER);
         overlay
@@ -675,7 +723,7 @@ impl App {
                 frame_conditions: self.frame_conditions(),
                 temp_limits: self.temp_limits,
                 cells: &self.cells,
-                selected_cell: self.selected_cell,
+                selected_cell: self.selected_index(),
                 tz: self.tz,
                 eta_for: &eta,
             },
@@ -732,9 +780,11 @@ struct RadarUpdate {
     /// `Some` while history is still loading, carrying "n/total" for the
     /// status line. Projections are suppressed until it is `None`.
     backfill: Option<String>,
-    /// `Some` only for the live volume: backfill frames are history, and
-    /// listing their storm cells would present stale threats as current.
-    cells: Option<Vec<crate::radar::cells::StormCell>>,
+    /// Every volume carries cells, backfill included: each one is the newest
+    /// observed frame at the moment it lands, and feeding the whole sequence
+    /// through the tracker is what gives motion at startup instead of two
+    /// refreshes later.
+    cells: Vec<crate::radar::cells::StormCell>,
 }
 
 struct ForecastUpdate {
@@ -871,8 +921,11 @@ pub async fn run(cfg: Config, home: Coords) -> Result<()> {
                     dispatch_error = Some(format!("{e:#}"));
                 }
             }
-            if tick.went_stale {
-                let _ = notify::send_stale_warning(engine.stale_elapsed());
+            if tick.went_stale
+                && let Err(e) =
+                    notify::send_stale_warning(engine.stale_elapsed(), &notify_scripts)
+            {
+                dispatch_error = Some(format!("{e:#}"));
             }
 
             let stale_secs = engine.stale_elapsed();
@@ -897,6 +950,10 @@ pub async fn run(cfg: Config, home: Coords) -> Result<()> {
     let site_coords = app.site.coords;
     let history = cfg.radar.frames;
     tokio::spawn(async move {
+        // Chronological order matters beyond the animation: the tracker reads
+        // this sequence as the storms' history, so motion is already measured
+        // by the time the first live volume arrives.
+        let mut tracker = crate::radar::cells::CellTracker::default();
         // Without this the ring holds a single volume and there is nothing to
         // animate until enough wall-clock time has passed to accumulate one.
         // Frames are sent as each download finishes so the loop fills visibly.
@@ -905,7 +962,12 @@ pub async fn run(cfg: Config, home: Coords) -> Result<()> {
                 let total = ids.len();
                 for (i, id) in ids.into_iter().enumerate() {
                     let loaded = fetch::archived_field(id).await.map(|(at, f)| {
-                        RadarUpdate { observed_at: at, field: Box::new(f), backfill: None, cells: None }
+                        let cells = tracker.track(
+                            crate::radar::cells::scan(&f, site_coords, home),
+                            at,
+                            home,
+                        );
+                        RadarUpdate { observed_at: at, field: Box::new(f), backfill: None, cells }
                     });
                     let progress = format!("backfill {}/{total}", i + 1);
                     if radar_tx
@@ -926,8 +988,12 @@ pub async fn run(cfg: Config, home: Coords) -> Result<()> {
             let result = fetch::latest_field(&radar_site)
                 .await
                 .map(|(at, f)| {
-                    let cells = crate::radar::cells::scan(&f, site_coords, home);
-                    RadarUpdate { observed_at: at, field: Box::new(f), backfill: None, cells: Some(cells) }
+                    let cells = tracker.track(
+                        crate::radar::cells::scan(&f, site_coords, home),
+                        at,
+                        home,
+                    );
+                    RadarUpdate { observed_at: at, field: Box::new(f), backfill: None, cells }
                 });
             if radar_tx.send(Update::Radar(result)).await.is_err() {
                 return;
@@ -1101,11 +1167,7 @@ async fn event_loop(
                     };
                 }
                 Update::Radar(Ok(RadarUpdate { observed_at, field, backfill, cells })) => {
-                    if let Some(cells) = cells {
-                        app.selected_cell =
-                            app.selected_cell.filter(|i| *i < cells.len());
-                        app.cells = cells;
-                    }
+                    app.absorb_cells(cells);
                     let observed: Arc<dyn RadarField> = Arc::from(field);
                     let tilt = observed.elevation_degrees();
                     app.ring.push(RadarFrame {
@@ -1427,7 +1489,11 @@ mod tests {
         let mut app = app_showing(45.0, 0.98);
         app.cells = (0..n)
             .map(|i| crate::radar::cells::StormCell {
+                id: i as u32 + 1,
+                motion: None,
+                approach: None,
                 centroid: Coords { lat: 36.0 + i as f64 * 0.3, lon: -87.0 },
+                track_point: Coords { lat: 36.0 + i as f64 * 0.3, lon: -87.0 },
                 max_dbz: 50.0,
                 rotation_ms: None,
                 min_cc: None,
@@ -1571,27 +1637,78 @@ mod tests {
     fn cycling_wraps_and_pans_the_map_to_the_cell() {
         let mut app = app_with_cells(2);
         app.apply(Action::CellNext);
-        assert_eq!(app.selected_cell, Some(0));
+        assert_eq!(app.selected, Some(app.cells[0].id));
         assert!(
             (app.viewport.centre.lat - app.cells[0].centroid.lat).abs() < 1e-9,
             "selecting a cell must pan to it"
         );
         app.apply(Action::CellNext);
-        assert_eq!(app.selected_cell, Some(1));
+        assert_eq!(app.selected, Some(app.cells[1].id));
         app.apply(Action::CellNext);
-        assert_eq!(app.selected_cell, Some(0), "cycling wraps");
+        assert_eq!(app.selected, Some(app.cells[0].id), "cycling wraps");
         app.apply(Action::CellPrev);
-        assert_eq!(app.selected_cell, Some(1), "prev wraps backwards");
+        assert_eq!(app.selected, Some(app.cells[1].id), "prev wraps backwards");
+    }
+
+    #[test]
+    fn the_selection_follows_the_storm_when_the_ranking_reorders() {
+        let mut app = app_with_cells(2);
+        app.apply(Action::CellNext);
+        let picked = app.selected.unwrap();
+        let mut reordered = app.cells.clone();
+        reordered.reverse();
+        app.absorb_cells(reordered);
+        assert_eq!(app.selected, Some(picked), "the same storm stays selected");
+        assert_eq!(app.selected_index(), Some(1), "even though it is now the second row");
+    }
+
+    #[test]
+    fn the_map_tracks_a_selected_cell_until_the_user_pans_away() {
+        let mut app = app_with_cells(1);
+        app.apply(Action::CellNext);
+
+        let mut moved = app.cells.clone();
+        moved[0].centroid.lat += 0.2;
+        app.absorb_cells(moved.clone());
+        assert!(
+            (app.viewport.centre.lat - app.cells[0].centroid.lat).abs() < 1e-9,
+            "the map should have followed the storm"
+        );
+
+        app.apply(Action::PanWest);
+        let parked = app.viewport.centre;
+        moved[0].centroid.lat += 0.2;
+        app.absorb_cells(moved);
+        assert_eq!(app.viewport.centre, parked, "panning away ends the follow");
+    }
+
+    #[test]
+    fn a_vanished_cell_releases_the_selection_and_says_so() {
+        let mut app = app_with_cells(1);
+        app.apply(Action::CellNext);
+        app.absorb_cells(Vec::new());
+        assert_eq!(app.selected, None);
+        assert_eq!(app.status, "tracked cell no longer listed");
+    }
+
+    /// Every volume replaces the cell list. A user who never selected anything
+    /// must not be told something dissipated once per refresh, forever.
+    #[test]
+    fn an_empty_volume_says_nothing_when_no_cell_was_selected() {
+        let mut app = app_with_cells(1);
+        let before = app.status.clone();
+        app.absorb_cells(Vec::new());
+        assert_eq!(app.status, before);
     }
 
     #[test]
     fn cycling_with_no_cells_explains_itself_instead_of_panicking() {
         let mut app = app_with_cells(0);
         app.apply(Action::CellNext);
-        assert_eq!(app.selected_cell, None);
+        assert_eq!(app.selected, None);
         assert_eq!(app.status, "no storm cells detected");
         app.apply(Action::CellPrev);
-        assert_eq!(app.selected_cell, None);
+        assert_eq!(app.selected, None);
     }
 
     /// An empty sky and a failed fetch look
