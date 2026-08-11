@@ -214,8 +214,12 @@ fn default_extra_events() -> Vec<String> {
 /// Convective coverage alone left tsunami, storm surge, hurricane and the
 /// evacuation-class civil messages silently discarded. `XH.W` is the current
 /// extreme-heat code and `EH.W` its retired predecessor; both are listed
-/// because feeds still carry the old one. Marine products stay out: this is an
-/// inland radar tool and a rip current statement is not what it is for.
+/// because feeds still carry the old one. `EC.W` and the retired `WC.W` are
+/// the cold half of that pair, and their absence was not a judgement call
+/// about cold, it was an oversight: heat was listed twice over while the
+/// hazard that actually kills during a winter outage was dropped in silence.
+/// Marine products stay out: this is an inland radar tool and a rip current
+/// statement is not what it is for.
 fn default_lethal() -> Vec<String> {
     [
         "TO.W", "EW.W", "FF.W", "TS.W", "SS.W", "HU.W",
@@ -233,7 +237,7 @@ fn default_lethal() -> Vec<String> {
 fn default_severe() -> Vec<String> {
     [
         "SV.W", "SQ.W", "DS.W", "TR.W", "FA.W", "FL.W", "BZ.W", "IS.W", "WS.W", "XH.W", "EH.W",
-        "HW.W", "CF.W", "AV.W",
+        "EC.W", "WC.W", "HW.W", "CF.W", "AV.W",
         "Civil Emergency Message",
         "Law Enforcement Warning",
     ]
@@ -242,7 +246,7 @@ fn default_severe() -> Vec<String> {
     .collect()
 }
 fn default_watch() -> Vec<String> {
-    ["TO.A", "SV.A", "HU.A", "TR.A", "SS.A", "TS.A", "FF.A", "BZ.A", "WS.A", "XH.A"]
+    ["TO.A", "SV.A", "HU.A", "TR.A", "SS.A", "TS.A", "FF.A", "BZ.A", "WS.A", "XH.A", "EC.A", "WC.A"]
         .iter()
         .map(|s| s.to_string())
         .collect()

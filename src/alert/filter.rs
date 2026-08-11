@@ -195,6 +195,50 @@ mod tests {
         }
     }
 
+    /// Regression, Middle Tennessee, 2026-01-26. An ice storm cut power to
+    /// 230,000 homes for over a week, and the cold behind it killed 11 of the
+    /// 21 Tennesseans who died, indoors, in unheated houses. NWS carried an
+    /// Extreme Cold Warning through that night. The allowlist listed heat
+    /// under both its current and retired codes and had no cold entry at all,
+    /// so `classify` returned `None` and the warning was discarded in silence
+    /// during the hours it mattered most.
+    #[test]
+    fn extreme_cold_is_alerted_under_both_the_current_and_retired_code() {
+        for (event, vtec, tier) in [
+            ("Extreme Cold Warning", "/O.NEW.KOHX.EC.W.0001.260126T2359Z-260128T0600Z/",
+             ThreatTier::Severe),
+            ("Wind Chill Warning", "/O.NEW.KOHX.WC.W.0001.260126T2359Z-260128T0600Z/",
+             ThreatTier::Severe),
+            ("Extreme Cold Watch", "/O.NEW.KOHX.EC.A.0001.260126T2359Z-260128T0600Z/",
+             ThreatTier::Watch),
+            ("Wind Chill Watch", "/O.NEW.KOHX.WC.A.0001.260126T2359Z-260128T0600Z/",
+             ThreatTier::Watch),
+        ] {
+            let a = alert_with(event, Some(vtec));
+            assert_eq!(filter().classify(&a), Some(tier), "{event} {vtec}");
+        }
+    }
+
+    /// The pairing is the invariant: whenever a temperature extreme is
+    /// alertable in one direction it must be alertable in the other, or the
+    /// list silently encodes a preference about which way people die.
+    #[test]
+    fn heat_and_cold_are_covered_symmetrically() {
+        let alerts = crate::config::Alerts::default();
+        for (hot, cold) in [("XH.W", "EC.W"), ("EH.W", "WC.W")] {
+            assert!(
+                alerts.tiers.severe.iter().any(|s| s == hot)
+                    && alerts.tiers.severe.iter().any(|s| s == cold),
+                "{hot} and {cold} must both be severe"
+            );
+        }
+        assert!(
+            alerts.tiers.watch.iter().any(|s| s == "XH.A")
+                && alerts.tiers.watch.iter().any(|s| s == "EC.A"),
+            "XH.A and EC.A must both be watch"
+        );
+    }
+
     #[test]
     fn drowning_class_products_are_not_silently_discarded() {
         for (event, vtec, tier) in [
