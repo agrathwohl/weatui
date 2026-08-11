@@ -18,7 +18,7 @@ const MAX_BACKOFF_SECS: u64 = 300;
 
 #[derive(Debug)]
 pub enum PollOutcome {
-    Updated(Vec<Alert>),
+    Updated { alerts: Vec<Alert>, dropped: usize },
     Unchanged,
 }
 
@@ -161,9 +161,10 @@ impl Poller {
         self.retry_after = None;
 
         self.etag = new_etag;
-        Ok(PollOutcome::Updated(
-            body.features.into_iter().map(Alert::from_feature).collect(),
-        ))
+        Ok(PollOutcome::Updated {
+            dropped: body.dropped,
+            alerts: body.features.into_iter().map(Alert::from_feature).collect(),
+        })
     }
 }
 

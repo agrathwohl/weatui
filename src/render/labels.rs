@@ -17,6 +17,7 @@ const MAX_HAZARD_LETTERS: usize = 3;
 fn hazard_color(h: Hazard) -> Color {
     match h {
         Hazard::Tornado => Color::Rgb(255, 60, 60),
+        Hazard::PossibleTornado => Color::Rgb(255, 190, 90),
         Hazard::Hail => Color::Rgb(245, 210, 70),
         Hazard::Wind => Color::Rgb(255, 130, 40),
         Hazard::Lightning => Color::Rgb(170, 150, 255),

@@ -37,9 +37,9 @@ pub struct Filter {
 impl Filter {
     pub fn from_config(alerts: &Alerts) -> Self {
         Filter {
-            lethal: alerts.tiers.lethal.iter().cloned().collect(),
-            severe: alerts.tiers.severe.iter().cloned().collect(),
-            watch: alerts.tiers.watch.iter().cloned().collect(),
+            lethal: alerts.tiers.lethal_codes().map(str::to_string).collect(),
+            severe: alerts.tiers.severe_codes().map(str::to_string).collect(),
+            watch: alerts.tiers.watch_codes().map(str::to_string).collect(),
             extra_events: alerts.extra_events.iter().cloned().collect(),
         }
     }
@@ -273,7 +273,10 @@ mod tests {
 
     #[test]
     fn a_malformed_vtec_on_a_non_warning_product_still_rejects() {
-        let a = alert_with("Rip Current Statement", Some("/garbage/"));
+        let a = alert_with(
+            "Rip Current Statement",
+            Some("/O.NEW.KBOX.RP.S.NOTANETN.260727T0700Z-260727T1900Z/"),
+        );
         assert!(a.vtec_unparsed());
         assert_eq!(filter().classify(&a), None, "fail-open is scoped to Warning products");
     }

@@ -109,6 +109,30 @@ pub struct Tiers {
     pub severe: Vec<String>,
     #[serde(default = "default_watch")]
     pub watch: Vec<String>,
+    /// Added to the shipped defaults rather than replacing them.
+    ///
+    /// `lethal`/`severe`/`watch` REPLACE, which reads as additive and is not:
+    /// `lethal = ["TS.W"]` silently deletes TO.W and every other built-in.
+    /// Anyone whose intent is "also alert me about X" wants these keys, and
+    /// cannot lose tornado coverage by using them.
+    #[serde(default)]
+    pub extra_lethal: Vec<String>,
+    #[serde(default)]
+    pub extra_severe: Vec<String>,
+    #[serde(default)]
+    pub extra_watch: Vec<String>,
+}
+
+impl Tiers {
+    pub fn lethal_codes(&self) -> impl Iterator<Item = &str> {
+        self.lethal.iter().chain(&self.extra_lethal).map(String::as_str)
+    }
+    pub fn severe_codes(&self) -> impl Iterator<Item = &str> {
+        self.severe.iter().chain(&self.extra_severe).map(String::as_str)
+    }
+    pub fn watch_codes(&self) -> impl Iterator<Item = &str> {
+        self.watch.iter().chain(&self.extra_watch).map(String::as_str)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -301,6 +325,9 @@ impl Default for Tiers {
             lethal: default_lethal(),
             severe: default_severe(),
             watch: default_watch(),
+            extra_lethal: Vec::new(),
+            extra_severe: Vec::new(),
+            extra_watch: Vec::new(),
         }
     }
 }
@@ -570,6 +597,36 @@ mod tests {
     fn a_typo_in_a_section_is_rejected_rather_than_silently_defaulted() {
         let err = err_for("[location]\nzip = \"73019\"\n\n[alerts.notifiy]\nlethal = \"none\"\n");
         assert!(err.contains("notifiy"), "got: {err}");
+    }
+
+    #[test]
+    fn extra_tier_keys_add_to_the_defaults_instead_of_replacing_them() {
+        let cfg = Config::parse(
+            "[location]\nzip = \"73019\"\n\n[alerts.tiers]\nextra_lethal = [\"GL.W\"]\n",
+            "/tmp/c.toml",
+        )
+        .unwrap();
+        let f = crate::alert::filter::Filter::from_config(&cfg.alerts);
+
+        assert!(
+            cfg.alerts.tiers.lethal_codes().any(|c| c == "GL.W"),
+            "the addition is present"
+        );
+        assert!(
+            cfg.alerts.tiers.lethal_codes().any(|c| c == "TO.W"),
+            "and adding something must not delete tornado coverage"
+        );
+        let _ = f;
+    }
+
+    #[test]
+    fn replacing_a_tier_still_works_for_users_who_mean_it() {
+        let cfg = Config::parse(
+            "[location]\nzip = \"73019\"\n\n[alerts.tiers]\nlethal = [\"TO.W\"]\n",
+            "/tmp/c.toml",
+        )
+        .unwrap();
+        assert_eq!(cfg.alerts.tiers.lethal_codes().count(), 1);
     }
 
     #[test]

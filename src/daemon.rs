@@ -43,6 +43,9 @@ pub struct Tick {
     /// issued and expired inside that window is unrecoverable, because the
     /// point query only ever returns currently-active alerts.
     pub recovered_after_gap_secs: Option<u64>,
+    /// Features in the last response that could not be parsed. Non-zero means
+    /// the snapshot was incomplete and nothing was expired from it.
+    pub dropped_features: usize,
 }
 
 /// Daemon mode never constructs `App`, so a misspelled site id used to go
@@ -102,6 +105,7 @@ impl AlertEngine {
             went_stale: false,
             poll_error: None,
             recovered_after_gap_secs: None,
+            dropped_features: 0,
         };
 
         let gap_before_poll = self
@@ -110,8 +114,14 @@ impl AlertEngine {
             .map(|prev| now.saturating_sub(prev));
 
         let succeeded = match self.poller.poll().await {
-            Ok(PollOutcome::Updated(alerts)) => {
-                out.fresh = self.state.ingest(alerts, &self.filter);
+            Ok(PollOutcome::Updated { alerts, dropped }) => {
+                out.dropped_features = dropped;
+                out.fresh = self.state.ingest_at(
+                    alerts,
+                    &self.filter,
+                    chrono::Utc::now(),
+                    dropped == 0,
+                );
                 self.state.mark_poll_success(now);
                 true
             }
@@ -183,6 +193,14 @@ pub async fn run(cfg: Config, home: Coords, echo_to_stdout: bool) -> Result<()> 
             if let Err(e) = notify::dispatch(n, &cfg.alerts.notify, &cfg.alerts.scripts, eta) {
                 eprintln!("weatui: notification failed: {e:#}");
             }
+        }
+
+        if tick.dropped_features > 0 {
+            eprintln!(
+                "weatui: {} alert feature(s) in the last response could not be parsed; \
+                 the snapshot is incomplete and nothing was expired from it",
+                tick.dropped_features
+            );
         }
 
         if let Some(gap) = tick.recovered_after_gap_secs {

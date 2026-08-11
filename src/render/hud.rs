@@ -44,7 +44,6 @@ pub fn threat_rgb(threat: crate::radar::cells::CellThreat) -> crate::render::col
     use crate::radar::cells::CellThreat;
     match threat {
         CellThreat::Debris => (255, 60, 60),
-        CellThreat::Rotation => (255, 130, 40),
         CellThreat::PossibleRotation => (255, 190, 90),
         CellThreat::Hail => (245, 210, 70),
         CellThreat::Intense => (225, 120, 235),
@@ -577,13 +576,13 @@ mod tests {
     #[test]
     fn cells_render_ranked_with_detail_on_the_selection() {
         use crate::radar::cells::CellThreat;
-        let cells = [cell(CellThreat::Rotation), cell(CellThreat::Strong)];
+        let cells = [cell(CellThreat::PossibleRotation), cell(CellThreat::Strong)];
         let text: Vec<String> = cells_lines(&cells, Some(0))
             .iter()
             .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
             .collect();
         let joined = text.join("\n");
-        assert!(joined.contains("rotation"), "{joined}");
+        assert!(joined.contains("maybe rot"), "{joined}");
         assert!(joined.contains("42 km NE"), "{joined}");
         assert!(joined.contains("57 dBZ"), "{joined}");
         assert!(joined.contains("\u{394}v 46 m/s"), "{joined}");
@@ -653,7 +652,7 @@ mod tests {
 
     #[test]
     fn a_tracked_cell_shows_its_heading_and_its_arrival() {
-        let mut c = cell(crate::radar::cells::CellThreat::Rotation);
+        let mut c = cell(crate::radar::cells::CellThreat::PossibleRotation);
         c.motion =
             Some(crate::radar::cells::CellMotion { heading_deg: 90.0, speed_kmh: 55.6 });
         c.approach =

@@ -80,11 +80,6 @@ impl AlertState {
         Self::default()
     }
 
-    /// Returns only the alerts that warrant a fresh desktop notification.
-    pub fn ingest(&mut self, incoming: Vec<Alert>, filter: &Filter) -> Vec<Notification> {
-        self.ingest_at(incoming, filter, chrono::Utc::now())
-    }
-
     /// Expired products are skipped here as well as pruned, and the two have to
     /// agree. Pruning alone would let an alert the feed still lists past its
     /// expiry be dropped, re-ingested, and notified again on every single poll.
@@ -93,6 +88,7 @@ impl AlertState {
         incoming: Vec<Alert>,
         filter: &Filter,
         now: chrono::DateTime<chrono::Utc>,
+        complete: bool,
     ) -> Vec<Notification> {
         let mut seen: HashSet<AlertKey> = HashSet::new();
         let mut fresh = Vec::new();
@@ -129,8 +125,13 @@ impl AlertState {
             self.active.insert(key, ActiveAlert { alert, tier });
         }
 
-        self.active.retain(|k, _| seen.contains(k));
-        self.notified.retain(|k, _| seen.contains(k));
+        // Absence only means "gone" when the snapshot was whole. A batch that
+        // lost a feature to a parse error cannot be used to expire anything:
+        // the missing one may be the warning still in force.
+        if complete {
+            self.active.retain(|k, _| seen.contains(k));
+            self.notified.retain(|k, _| seen.contains(k));
+        }
         fresh
     }
 
@@ -174,6 +175,13 @@ impl AlertState {
 }
 
 #[cfg(test)]
+impl AlertState {
+    fn ingest_now(&mut self, incoming: Vec<Alert>, filter: &Filter) -> Vec<Notification> {
+        self.ingest_at(incoming, filter, chrono::Utc::now(), true)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::alert::{AlertCollection, Feature};
@@ -198,14 +206,15 @@ mod tests {
 
     const TOR_NEW: &str = "/O.NEW.KTLX.TO.W.0012.260727T0700Z-260727T0730Z/";
     const TOR_CON: &str = "/O.CON.KTLX.TO.W.0012.260727T0705Z-260727T0730Z/";
+    const SVR_NEW: &str = "/O.NEW.KTLX.SV.W.0088.260727T0700Z-260727T0800Z/";
     const TOR_CAN: &str = "/O.CAN.KTLX.TO.W.0012.260727T0710Z-260727T0730Z/";
 
     #[test]
     fn a8_same_event_seen_twice_notifies_once() {
         let mut st = AlertState::new();
         let f = filter();
-        assert_eq!(st.ingest(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f).len(), 1);
-        assert_eq!(st.ingest(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f).len(), 0);
+        assert_eq!(st.ingest_now(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f).len(), 1);
+        assert_eq!(st.ingest_now(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f).len(), 0);
         assert_eq!(st.active().count(), 1);
     }
 
@@ -213,8 +222,8 @@ mod tests {
     fn a8_continuation_does_not_renotify() {
         let mut st = AlertState::new();
         let f = filter();
-        st.ingest(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f);
-        let second = st.ingest(vec![alert_with("Tornado Warning", Some(TOR_CON))], &f);
+        st.ingest_now(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f);
+        let second = st.ingest_now(vec![alert_with("Tornado Warning", Some(TOR_CON))], &f);
         assert!(second.is_empty());
         assert_eq!(st.active().count(), 1);
     }
@@ -223,8 +232,8 @@ mod tests {
     fn a8_cancel_clears_the_alert() {
         let mut st = AlertState::new();
         let f = filter();
-        st.ingest(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f);
-        st.ingest(vec![alert_with("Tornado Warning", Some(TOR_CAN))], &f);
+        st.ingest_now(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f);
+        st.ingest_now(vec![alert_with("Tornado Warning", Some(TOR_CAN))], &f);
         assert_eq!(st.active().count(), 0);
     }
 
@@ -232,9 +241,9 @@ mod tests {
     fn alert_absent_from_a_later_poll_is_dropped() {
         let mut st = AlertState::new();
         let f = filter();
-        st.ingest(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f);
+        st.ingest_now(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f);
         assert_eq!(st.active().count(), 1);
-        st.ingest(Vec::new(), &f);
+        st.ingest_now(Vec::new(), &f);
         assert_eq!(st.active().count(), 0);
     }
 
@@ -242,16 +251,16 @@ mod tests {
     fn a_cleared_alert_notifies_again_if_it_returns() {
         let mut st = AlertState::new();
         let f = filter();
-        st.ingest(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f);
-        st.ingest(Vec::new(), &f);
-        assert_eq!(st.ingest(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f).len(), 1);
+        st.ingest_now(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f);
+        st.ingest_now(Vec::new(), &f);
+        assert_eq!(st.ingest_now(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f).len(), 1);
     }
 
     #[test]
     fn rejected_products_never_enter_state() {
         let mut st = AlertState::new();
         let f = filter();
-        let out = st.ingest(
+        let out = st.ingest_now(
             vec![
                 alert_with("Air Quality Alert", None),
                 alert_with("Small Craft Advisory", Some("/O.NEW.KBOX.SC.Y.0123.260727T0700Z-260727T1900Z/")),
@@ -266,7 +275,7 @@ mod tests {
     fn distinct_etns_are_tracked_separately() {
         let mut st = AlertState::new();
         let f = filter();
-        let out = st.ingest(
+        let out = st.ingest_now(
             vec![
                 alert_with("Tornado Warning", Some(TOR_NEW)),
                 alert_with("Tornado Warning", Some("/O.NEW.KTLX.TO.W.0013.260727T0700Z-260727T0730Z/")),
@@ -290,10 +299,10 @@ mod tests {
         let mut st = AlertState::new();
         let f = filter();
 
-        let first = st.ingest(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f);
+        let first = st.ingest_now(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f);
         assert_eq!(first.len(), 1);
 
-        let upgraded = st.ingest(
+        let upgraded = st.ingest_now(
             vec![alert_with_params(
                 "Tornado Warning",
                 TOR_CON,
@@ -313,8 +322,8 @@ mod tests {
     fn an_ordinary_continuation_still_does_not_renotify() {
         let mut st = AlertState::new();
         let f = filter();
-        st.ingest(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f);
-        let again = st.ingest(vec![alert_with("Tornado Warning", Some(TOR_CON))], &f);
+        st.ingest_now(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f);
+        let again = st.ingest_now(vec![alert_with("Tornado Warning", Some(TOR_CON))], &f);
         assert!(again.is_empty(), "no severity change means no second toast");
     }
 
@@ -326,10 +335,10 @@ mod tests {
         let mut st = AlertState::new();
         let f = filter();
 
-        let first = st.ingest(vec![alert_with("Tornado Watch", Some(TOR_WATCH_SAME_ETN))], &f);
+        let first = st.ingest_now(vec![alert_with("Tornado Watch", Some(TOR_WATCH_SAME_ETN))], &f);
         assert_eq!(first.len(), 1, "the watch should notify");
 
-        let second = st.ingest(
+        let second = st.ingest_now(
             vec![
                 alert_with("Tornado Watch", Some(TOR_WATCH_SAME_ETN)),
                 alert_with("Tornado Warning", Some(TOR_NEW)),
@@ -348,7 +357,7 @@ mod tests {
     fn a_watch_does_not_overwrite_a_warning_sharing_its_etn() {
         let mut st = AlertState::new();
         let f = filter();
-        st.ingest(
+        st.ingest_now(
             vec![
                 alert_with("Tornado Warning", Some(TOR_NEW)),
                 alert_with("Tornado Watch", Some(TOR_WATCH_SAME_ETN)),
@@ -363,14 +372,14 @@ mod tests {
     fn an_expiring_watch_does_not_delete_a_live_warning() {
         let mut st = AlertState::new();
         let f = filter();
-        st.ingest(
+        st.ingest_now(
             vec![
                 alert_with("Tornado Warning", Some(TOR_NEW)),
                 alert_with("Tornado Watch", Some(TOR_WATCH_SAME_ETN)),
             ],
             &f,
         );
-        st.ingest(
+        st.ingest_now(
             vec![
                 alert_with("Tornado Warning", Some(TOR_NEW)),
                 alert_with("Tornado Watch", Some(TOR_WATCH_EXP_SAME_ETN)),
@@ -388,7 +397,7 @@ mod tests {
     fn highest_tier_reports_the_worst_active_threat() {
         let mut st = AlertState::new();
         let f = filter();
-        st.ingest(
+        st.ingest_now(
             vec![
                 alert_with("Severe Thunderstorm Watch", Some("/O.NEW.KWNS.SV.A.0455.260727T1800Z-260728T0200Z/")),
                 alert_with("Tornado Warning", Some(TOR_NEW)),
@@ -412,7 +421,7 @@ mod tests {
         let f = filter();
         let expires = "2026-07-27T07:30:00Z";
         let live = chrono::DateTime::parse_from_rfc3339("2026-07-27T07:05:00Z").unwrap().to_utc();
-        st.ingest_at(vec![alert_expiring(TOR_NEW, expires)], &f, live);
+        st.ingest_at(vec![alert_expiring(TOR_NEW, expires)], &f, live, true);
         assert_eq!(st.active().count(), 1);
 
         let before = chrono::DateTime::parse_from_rfc3339("2026-07-27T07:20:00Z").unwrap().to_utc();
@@ -433,14 +442,14 @@ mod tests {
         let after = chrono::DateTime::parse_from_rfc3339("2026-07-27T07:31:00Z").unwrap().to_utc();
 
         assert_eq!(
-            st.ingest_at(vec![alert_expiring(TOR_NEW, expires)], &f, before).len(),
+            st.ingest_at(vec![alert_expiring(TOR_NEW, expires)], &f, before, true).len(),
             1,
             "notifies once while live"
         );
 
         for poll in 0..5 {
             st.prune_expired(after);
-            let again = st.ingest_at(vec![alert_expiring(TOR_NEW, expires)], &f, after);
+            let again = st.ingest_at(vec![alert_expiring(TOR_NEW, expires)], &f, after, true);
             assert!(
                 again.is_empty(),
                 "poll {poll}: an expired alert the feed still lists must not re-notify"
@@ -453,7 +462,7 @@ mod tests {
     fn an_alert_with_no_expiry_is_left_to_the_feed() {
         let mut st = AlertState::new();
         let f = filter();
-        st.ingest(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f);
+        st.ingest_now(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f);
         let far_future = chrono::DateTime::parse_from_rfc3339("2099-01-01T00:00:00Z").unwrap().to_utc();
         assert_eq!(st.prune_expired(far_future), 0);
         assert_eq!(st.active().count(), 1);
@@ -469,6 +478,40 @@ mod tests {
             "recording the sentinel would make the next elapsed zero and disable staleness"
         );
         assert!(st.is_stale(crate::daemon::CLOCK_BROKEN, 300));
+    }
+
+    #[test]
+    fn an_incomplete_snapshot_never_expires_a_live_warning() {
+        let mut st = AlertState::new();
+        let f = filter();
+        let now = chrono::Utc::now();
+
+        st.ingest_at(vec![alert_with("Tornado Warning", Some(TOR_NEW))], &f, now, true);
+        assert_eq!(st.active().count(), 1);
+
+        // The tornado warning is the feature that failed to parse, so it is
+        // absent from this batch while still being in force.
+        let fresh = st.ingest_at(
+            vec![alert_with("Severe Thunderstorm Warning", Some(SVR_NEW))],
+            &f,
+            now,
+            false,
+        );
+        assert_eq!(
+            st.active().count(),
+            2,
+            "an incomplete batch must not be read as proof the warning ended"
+        );
+        assert_eq!(fresh.len(), 1, "the feature that did arrive still notifies");
+
+        // Once a whole snapshot says it is gone, it goes.
+        st.ingest_at(
+            vec![alert_with("Severe Thunderstorm Warning", Some(SVR_NEW))],
+            &f,
+            now,
+            true,
+        );
+        assert_eq!(st.active().count(), 1);
     }
 
     #[test]

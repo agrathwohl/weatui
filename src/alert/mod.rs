@@ -117,44 +117,55 @@ pub struct Feature {
     pub properties: Properties,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AlertCollection {
-    /// Required, deliberately. A GeoJSON FeatureCollection always carries
-    /// `features`, empty when there is nothing active. Defaulting it meant a
-    /// 200 with any other shape (schema change, error envelope, captive
-    /// portal) parsed as zero alerts, cleared all active state and counted as
-    /// a successful poll. That is the one failure the staleness backstop
-    /// cannot catch, because nothing failed.
-    #[serde(deserialize_with = "features_skipping_malformed")]
     pub features: Vec<Feature>,
+    /// Features present in the body that could not be deserialized.
+    ///
+    /// Non-zero means this snapshot is INCOMPLETE, and an incomplete snapshot
+    /// must never be used to expire state. If the feature that failed was the
+    /// tornado warning, treating the rest as the whole truth deletes the live
+    /// warning and reports a healthy poll: silence in the reassuring
+    /// direction, and the exact failure staleness cannot catch.
+    pub dropped: usize,
 }
 
-/// One unparseable feature used to discard every other alert in the response.
-/// Losing one alert is bad; losing a tornado warning because some unrelated
-/// product had a surprising shape is worse, so bad entries are skipped
-/// individually. `features` itself is still required, so a wholesale schema
-/// change is still an error rather than an empty sky.
-fn features_skipping_malformed<'de, D>(d: D) -> Result<Vec<Feature>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let raw: Vec<serde_json::Value> = Vec::deserialize(d)?;
-    let offered = raw.len();
-    let kept: Vec<Feature> = raw
-        .into_iter()
-        .filter_map(|v| serde_json::from_value(v).ok())
-        .collect();
+impl<'de> Deserialize<'de> for AlertCollection {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // NOT deny_unknown_fields. A real FeatureCollection carries @context,
+        // type, title, updated and pagination alongside `features`; rejecting
+        // them fails every single poll. Only the presence of `features`
+        // matters, and that is enforced by it having no default.
+        #[derive(Deserialize)]
+        struct Raw {
+            /// Required. A GeoJSON FeatureCollection always carries this,
+            /// empty when nothing is active. Defaulting it let a 200 of any
+            /// other shape parse as zero alerts and count as a good poll.
+            features: Vec<serde_json::Value>,
+        }
 
-    // Skipping some is a repair; skipping all is a schema change wearing the
-    // costume of a calm day. An empty result from a non-empty body would clear
-    // every active alert and still count as a successful poll, which is the
-    // one failure staleness cannot catch.
-    if offered > 0 && kept.is_empty() {
-        return Err(serde::de::Error::custom(format!(
-            "all {offered} alert features failed to parse; refusing to treat that as an empty sky"
-        )));
+        let raw = Raw::deserialize(serde::de::IntoDeserializer::into_deserializer(
+            serde_json::Value::deserialize(d)?,
+        ))
+        .map_err(serde::de::Error::custom)?;
+
+        let offered = raw.features.len();
+        let features: Vec<Feature> = raw
+            .features
+            .into_iter()
+            .filter_map(|v| serde_json::from_value(v).ok())
+            .collect();
+
+        if offered > 0 && features.is_empty() {
+            return Err(serde::de::Error::custom(format!(
+                "all {offered} alert features failed to parse; refusing to treat that as an empty sky"
+            )));
+        }
+        Ok(AlertCollection { dropped: offered - features.len(), features })
     }
-    Ok(kept)
 }
 
 #[derive(Debug, Clone)]
@@ -168,19 +179,21 @@ pub struct Alert {
 impl Alert {
     pub fn from_feature(feature: Feature) -> Self {
         let raw = feature.properties.param("VTEC");
-        let vtec = vtec::VtecCode::parse_all(&raw);
+        let (vtec, failed_lines) = vtec::VtecCode::parse_all_counting(&raw);
         Alert {
-            vtec_unparsed: !raw.is_empty() && vtec.is_empty(),
+            vtec_unparsed: failed_lines > 0,
             properties: feature.properties,
             geometry: feature.geometry,
             vtec,
         }
     }
 
-    /// The product carried VTEC strings and none of them parsed. Distinct from
-    /// carrying none at all: a malformed or newly-introduced code on a real
-    /// warning would otherwise take the no-VTEC path and be dropped by an
-    /// allowlist it can never match.
+    /// At least one P-VTEC line in this product failed to parse.
+    ///
+    /// Deliberately ANY rather than ALL. An upgrade product carries the CAN
+    /// for the old event beside the NEW for its replacement, so a valid CAN
+    /// next to a malformed NEW would otherwise parse cleanly, read as a plain
+    /// cancellation, and lose the replacement warning in silence.
     pub fn vtec_unparsed(&self) -> bool {
         self.vtec_unparsed
     }
@@ -309,6 +322,101 @@ mod tests {
         let parsed: AlertCollection = serde_json::from_str(json).expect("batch must survive");
         assert_eq!(parsed.features.len(), 1, "the bad entry is skipped, not the good one");
         assert_eq!(parsed.features[0].properties.event, "Tornado Warning");
+    }
+
+    fn alert_with_vtec_lines(event: &str, lines: &[&str]) -> Alert {
+        let joined = lines.join("\\n");
+        let json = format!(
+            r#"{{"features":[{{"geometry":null,"properties":{{"event":"{event}","parameters":{{"VTEC":["{joined}"]}}}}}}]}}"#
+        );
+        let parsed: AlertCollection = serde_json::from_str(&json).unwrap();
+        Alert::from_feature(parsed.features.into_iter().next().unwrap())
+    }
+
+    #[test]
+    fn an_upgrade_product_reads_as_its_replacement_not_as_a_cancellation() {
+        let a = alert_with_vtec_lines(
+            "Tornado Warning",
+            &[
+                "/O.CAN.KTLX.SV.W.0087.260727T0700Z-260727T0800Z/",
+                "/O.NEW.KTLX.TO.W.0012.260727T0700Z-260727T0730Z/",
+            ],
+        );
+        let primary = a.primary_vtec().expect("a code");
+        assert_eq!(primary.phenomenon_significance(), "TO.W");
+        assert!(!primary.action.terminates_event(), "the replacement is the operative code");
+        assert!(!a.vtec_unparsed(), "both lines parsed");
+    }
+
+    #[test]
+    fn a_valid_cancel_beside_a_malformed_replacement_is_flagged_not_obeyed() {
+        let a = alert_with_vtec_lines(
+            "Tornado Warning",
+            &[
+                "/O.CAN.KTLX.SV.W.0087.260727T0700Z-260727T0800Z/",
+                "/O.NEW.KTLX.TO.W.BADETN.260727T0700Z-260727T0730Z/",
+            ],
+        );
+        assert!(
+            a.vtec_unparsed(),
+            "one bad line out of two must be flagged; reading this as a plain \
+             cancellation loses the warning that replaced the old event"
+        );
+    }
+
+    #[test]
+    fn hydrologic_vtec_is_skipped_rather_than_counted_as_a_failure() {
+        let a = alert_with_vtec_lines(
+            "Flash Flood Warning",
+            &[
+                "/O.NEW.KTLX.FF.W.0003.260727T0700Z-260727T0900Z/",
+                "/00000000T0000Z-000000T0000Z/OO/NR/0/",
+            ],
+        );
+        assert!(!a.vtec_unparsed(), "H-VTEC is a different format, not a broken P-VTEC");
+        assert_eq!(a.primary_vtec().unwrap().phenomenon_significance(), "FF.W");
+    }
+
+    /// Regression: the live envelope carries several sibling fields, and
+    /// rejecting them failed every poll with "unknown field `@context`",
+    /// which is a total alerting outage that fixture-shaped tests cannot see.
+    #[test]
+    fn the_real_api_envelope_parses() {
+        let json = r#"{
+            "@context": ["https://geojson.org/geojson-ld/geojson-context.jsonld"],
+            "type": "FeatureCollection",
+            "features": [
+                {"geometry":null,"properties":{"event":"Tornado Warning","parameters":{}}}
+            ],
+            "title": "Current watches, warnings, and advisories",
+            "updated": "2026-08-11T19:00:00+00:00",
+            "pagination": {"next": "https://api.weather.gov/alerts/active?cursor=x"}
+        }"#;
+        let parsed: AlertCollection =
+            serde_json::from_str(json).expect("the shape api.weather.gov actually returns");
+        assert_eq!(parsed.features.len(), 1);
+        assert_eq!(parsed.dropped, 0);
+    }
+
+    #[test]
+    fn a_partially_bad_batch_reports_how_much_it_lost() {
+        let json = r#"{"features":[
+            {"nonsense":true},
+            {"geometry":null,"properties":{"event":"Tornado Warning","parameters":{}}}
+        ]}"#;
+        let parsed: AlertCollection = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.features.len(), 1);
+        assert_eq!(parsed.dropped, 1);
+        assert!(parsed.dropped > 0, "an incomplete snapshot must say so");
+    }
+
+    #[test]
+    fn a_whole_batch_reports_itself_complete() {
+        let json = r#"{"features":[{"geometry":null,"properties":{"event":"X","parameters":{}}}]}"#;
+        let parsed: AlertCollection = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.dropped, 0);
+        assert_eq!(parsed.dropped, 0);
+        assert_eq!(serde_json::from_str::<AlertCollection>(r#"{"features":[]}"#).unwrap().dropped, 0);
     }
 
     #[test]

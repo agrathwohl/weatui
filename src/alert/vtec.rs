@@ -65,6 +65,15 @@ pub struct VtecCode {
     pub etn: u16,
 }
 
+/// P-VTEC opens with a one-character product class then an action, e.g.
+/// `/O.NEW.…`. H-VTEC has a different shape and is not a failed P-VTEC.
+fn is_p_vtec_candidate(line: &str) -> bool {
+    let body = line.trim_start_matches('/');
+    let mut parts = body.split('.');
+    matches!(parts.next(), Some(c) if c.len() == 1)
+        && matches!(parts.next(), Some(a) if a.len() == 3)
+}
+
 impl VtecCode {
     pub fn parse(raw: &str) -> Result<Self> {
         let body = raw.trim().trim_start_matches('/').trim_end_matches('/');
@@ -132,13 +141,31 @@ impl VtecCode {
         )
     }
 
+    /// Every P-VTEC line, and how many candidate lines failed.
+    ///
     /// NWS products may carry several VTEC strings, including H-VTEC for
     /// hydrologic events, which is not P-VTEC and must not be parsed as such.
-    pub fn parse_all(raws: &[String]) -> Vec<VtecCode> {
-        raws.iter()
-            .flat_map(|r| r.split('\n'))
-            .filter_map(|line| VtecCode::parse(line).ok())
-            .collect()
+    ///
+    /// Whether ANY line failed matters, not just whether all of them did. An
+    /// upgrade product carries the CAN for the old event beside the NEW for
+    /// its replacement, so a valid CAN next to a malformed NEW parses cleanly,
+    /// reads as a plain cancellation, and silently loses the warning that
+    /// replaced it. H-VTEC is excluded rather than counted: it is a different
+    /// format that legitimately fails this parser.
+    pub fn parse_all_counting(raws: &[String]) -> (Vec<VtecCode>, usize) {
+        let mut codes = Vec::new();
+        let mut failed = 0;
+        for line in raws.iter().flat_map(|r| r.split('\n')) {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || !is_p_vtec_candidate(trimmed) {
+                continue;
+            }
+            match VtecCode::parse(trimmed) {
+                Ok(c) => codes.push(c),
+                Err(_) => failed += 1,
+            }
+        }
+        (codes, failed)
     }
 }
 
@@ -233,7 +260,7 @@ mod tests {
             "/O.NEW.KDLH.SV.W.0087.260727T0700Z-260727T0800Z/".to_string(),
             "/00000000T0000Z-000000T0000Z/00/NN/0.0/".to_string(),
         ];
-        let parsed = VtecCode::parse_all(&raws);
+        let parsed = VtecCode::parse_all_counting(&raws).0;
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].phenomenon_significance(), "SV.W");
     }

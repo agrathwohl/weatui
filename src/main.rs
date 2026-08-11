@@ -71,8 +71,18 @@ async fn main() -> Result<()> {
 
     notify::set_hazard_link(home);
 
-    for problem in notify::preflight_scripts(&cfg.alerts.scripts) {
+    let script_problems = notify::preflight_scripts(&cfg.alerts.scripts);
+    for problem in &script_problems {
         eprintln!("weatui: {problem}");
+    }
+    // A tier silenced to "none" has the script as its ONLY channel, so an
+    // unusable one means that tier cannot be delivered at all. Starting anyway
+    // would present as a working monitor with a hole in it.
+    if !script_problems.is_empty() && !cfg.alerts.notify.uses_desktop_daemon() {
+        anyhow::bail!(
+            "every tier is silenced, so [alerts.scripts] is the only delivery channel, \
+             and it is unusable. Refusing to start as a monitor that cannot warn you"
+        );
     }
 
     if cfg.alerts.notify.uses_desktop_daemon() {

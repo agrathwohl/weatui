@@ -93,6 +93,10 @@ pub fn urgency_for(tier: ThreatTier, levels: &NotifyLevels) -> Urgency {
 /// A silent visual toast does not wake a sleeping person, and waking someone is
 /// the entire point of the critical tier. The freedesktop sound name is a hint:
 /// daemons that do not implement it ignore it rather than failing.
+/// Long enough for a siren to finish, short enough that a wedged script does
+/// not accumulate a thread and a zombie per alert through an outbreak.
+const SCRIPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 const CRITICAL_SOUND: &str = "string:sound-name:alarm-clock-elapsed";
 
 pub fn build_args(summary: &str, body: &str, urgency: Urgency) -> Vec<String> {
@@ -344,14 +348,35 @@ fn run_script(script: &str, n: &Notification, eta_minutes: Option<i64>) -> Resul
     // unwaited child would linger as a zombie.
     // Detached because the alert loop must not block on a slow script, but the
     // exit status still has to reach someone: a siren that cannot open the
-    // audio device was previously reported as a successful dispatch.
+    // audio device was previously reported as a successful dispatch. A plain
+    // blocking wait was not enough either, because a hung script parks its
+    // reaper thread forever, reports nothing, and leaks a thread per alert.
     let label = script.to_string();
-    std::thread::spawn(move || match child.wait() {
-        Ok(status) if !status.success() => {
-            eprintln!("weatui: alert script {label} exited with {status}");
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + SCRIPT_TIMEOUT;
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) if !status.success() => {
+                    eprintln!("weatui: alert script {label} exited with {status}");
+                    return;
+                }
+                Ok(Some(_)) => return,
+                Ok(None) if std::time::Instant::now() >= deadline => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    eprintln!(
+                        "weatui: alert script {label} still running after {}s, killed",
+                        SCRIPT_TIMEOUT.as_secs()
+                    );
+                    return;
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                Err(e) => {
+                    eprintln!("weatui: alert script {label} could not be reaped: {e}");
+                    return;
+                }
+            }
         }
-        Err(e) => eprintln!("weatui: alert script {label} could not be reaped: {e}"),
-        _ => {}
     });
     Ok(())
 }

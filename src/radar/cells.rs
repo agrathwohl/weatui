@@ -45,9 +45,6 @@ const TDS_MAX_CC: f32 = 0.85;
 /// right, and the lower bar is the safe one: the sampling lattice is coarser
 /// than the couplet it measures, so every span this reports is biased low.
 const TDS_MIN_ROTATION: f32 = 25.0;
-/// Above plausible Nyquist, so a span this large is not explainable as a
-/// single fold and counts as rotation outright.
-const ROTATION_CONFIRMED_MS: f32 = 40.0;
 const HAIL_VIL: f32 = 45.0;
 /// ~6-7 km at [`STEP_DEG`] spacing: the scale of a couplet plus grid slack.
 const LOCAL_RADIUS_CELLS: i64 = 3;
@@ -81,6 +78,10 @@ const MIN_CORE_SAMPLES: usize = 3;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Hazard {
     Tornado,
+    /// An uncorroborated velocity couplet. Painted with its own letter so the
+    /// map does not make the same claim for a possible fold artifact as it
+    /// does for a confirmed debris signature.
+    PossibleTornado,
     Hail,
     Wind,
     Lightning,
@@ -91,6 +92,7 @@ impl Hazard {
     pub fn letter(self) -> char {
         match self {
             Hazard::Tornado => 'T',
+            Hazard::PossibleTornado => '?',
             Hazard::Hail => 'H',
             Hazard::Wind => 'W',
             Hazard::Lightning => 'L',
@@ -109,11 +111,11 @@ pub(crate) fn hazards(
     max_echo_top_km: Option<f32>,
 ) -> Vec<Hazard> {
     let mut out = Vec::new();
-    if matches!(
-        threat,
-        CellThreat::Debris | CellThreat::Rotation | CellThreat::PossibleRotation
-    ) {
+    if threat == CellThreat::Debris {
         out.push(Hazard::Tornado);
+    }
+    if threat == CellThreat::PossibleRotation {
+        out.push(Hazard::PossibleTornado);
     }
     if threat == CellThreat::Hail {
         out.push(Hazard::Hail);
@@ -132,16 +134,15 @@ pub(crate) fn hazards(
 pub enum CellThreat {
     Strong,
     Intense,
-    Hail,
-    /// An uncorroborated 25-39 m/s span. Reported rather than promoted:
-    /// velocity is not dealiased and WSR-88D Nyquist sits around 25-35 m/s, so
-    /// a lone span in this band is as likely to be a fold artifact as a
-    /// couplet. Silently dropping it hid real low-end mesocyclones; silently
-    /// calling it rotation manufactures tornado claims from aliasing. It gets
-    /// a tornado hazard so it is visible, and its own label so it is not
-    /// mistaken for a confirmed couplet.
+    /// A velocity span with nothing corroborating it. Velocity here is NOT
+    /// dealiased, and a fold boundary produces a span near twice Nyquist,
+    /// roughly 50-70 m/s. No magnitude threshold can separate a real couplet
+    /// from a fold, so every uncorroborated span lands here regardless of size
+    /// and only an independent signal promotes it. Ranked below Hail because a
+    /// possible artifact is weaker evidence than a measured VIL or echo top,
+    /// and must not evict one from the cell list.
     PossibleRotation,
-    Rotation,
+    Hail,
     Debris,
 }
 
@@ -149,7 +150,6 @@ impl CellThreat {
     pub fn label(self) -> &'static str {
         match self {
             CellThreat::Debris => "debris",
-            CellThreat::Rotation => "rotation",
             CellThreat::PossibleRotation => "maybe rot",
             CellThreat::Hail => "hail",
             CellThreat::Intense => "intense",
@@ -234,9 +234,6 @@ pub(crate) fn classify(s: &CellStats) -> CellThreat {
     let rotating = s.rotation_ms.is_some_and(|r| r >= TDS_MIN_ROTATION);
     if rotating && s.min_cc.is_some_and(|cc| cc < TDS_MAX_CC) {
         return CellThreat::Debris;
-    }
-    if s.rotation_ms.is_some_and(|r| r >= ROTATION_CONFIRMED_MS) {
-        return CellThreat::Rotation;
     }
     if rotating {
         return CellThreat::PossibleRotation;
@@ -714,7 +711,11 @@ mod tests {
         });
         let cells = scan(&field, SITE, HOME);
         assert_eq!(cells.len(), 1);
-        assert_eq!(cells[0].threat, CellThreat::Rotation);
+        assert_eq!(
+            cells[0].threat,
+            CellThreat::PossibleRotation,
+            "a clean-CC couplet is uncorroborated; 48 m/s is also what a fold produces"
+        );
         assert!((cells[0].rotation_ms.unwrap() - 48.0).abs() < 0.1);
     }
 
@@ -773,7 +774,7 @@ mod tests {
             _ => None,
         });
         let cells = scan(&field, SITE, HOME);
-        assert_eq!(cells[0].threat, CellThreat::Rotation);
+        assert_eq!(cells[0].threat, CellThreat::PossibleRotation);
         assert!((cells[0].rotation_ms.unwrap() - 42.0).abs() < 0.1);
     }
 
@@ -799,7 +800,7 @@ mod tests {
         assert_eq!(cells.len(), 1);
         assert_eq!(
             cells[0].threat,
-            CellThreat::Rotation,
+            CellThreat::PossibleRotation,
             "the collapse is 50 km from the couplet; min_cc={:?}",
             cells[0].min_cc
         );
@@ -851,23 +852,28 @@ mod tests {
                 "{span} m/s is reportable but not confirmable on non-dealiased velocity"
             );
             assert!(
-                hazards(classify(&s), None, None).contains(&Hazard::Tornado),
-                "{span} m/s must still earn a tornado hazard letter, not vanish"
+                hazards(classify(&s), None, None).contains(&Hazard::PossibleTornado),
+                "{span} m/s must still be visible, just not as a confirmed tornado"
             );
         }
 
-        let confirmed = CellStats { rotation_ms: Some(45.0), ..base.clone() };
-        assert_eq!(
-            classify(&confirmed),
-            CellThreat::Rotation,
-            "above plausible Nyquist a fold cannot explain it"
-        );
+        for span in [45.0_f32, 60.0, 70.0] {
+            let s = CellStats { rotation_ms: Some(span), ..base.clone() };
+            assert_eq!(
+                classify(&s),
+                CellThreat::PossibleRotation,
+                "{span} m/s is in the two-times-Nyquist fold band; magnitude cannot confirm it"
+            );
+        }
 
         let quiet = CellStats { rotation_ms: Some(20.0), ..base.clone() };
         assert_eq!(classify(&quiet), CellThreat::Intense, "below the bar stays intense");
 
-        assert!(CellThreat::Rotation > CellThreat::PossibleRotation);
-        assert!(CellThreat::PossibleRotation > CellThreat::Hail);
+        assert!(CellThreat::Debris > CellThreat::PossibleRotation);
+        assert!(
+            CellThreat::Hail > CellThreat::PossibleRotation,
+            "a measured VIL beats a possible fold artifact, so artifacts cannot evict hail"
+        );
     }
 
     #[test]
@@ -886,7 +892,7 @@ mod tests {
             CellThreat::Debris,
             "a CC collapse corroborates the same span, so it is no longer merely possible"
         );
-        assert!(CellThreat::Debris > CellThreat::Rotation);
+        assert!(CellThreat::Debris > CellThreat::PossibleRotation);
     }
 
     #[test]
@@ -975,7 +981,7 @@ mod tests {
         let near_cells = scan(&couplet(near), SITE, Coords { lat: SITE.lat + 0.3, lon: SITE.lon });
         assert_eq!(
             near_cells[0].threat,
-            CellThreat::Rotation,
+            CellThreat::PossibleRotation,
             "the same couplet at 78 km is resolvable and must still register"
         );
     }
@@ -1203,8 +1209,14 @@ mod tests {
     #[test]
     fn hazard_letters_follow_the_cell_diagnostics() {
         assert_eq!(
-            hazards(CellThreat::Rotation, Some(30.0), Some(12.0)),
-            vec![Hazard::Tornado, Hazard::Wind, Hazard::Lightning, Hazard::Rain]
+            hazards(CellThreat::PossibleRotation, Some(30.0), Some(12.0)),
+            vec![
+                Hazard::PossibleTornado,
+                Hazard::Wind,
+                Hazard::Lightning,
+                Hazard::Rain
+            ],
+            "an uncorroborated span gets its own letter, not the confirmed T"
         );
         assert_eq!(hazards(CellThreat::Hail, Some(10.0), Some(9.5)),
             vec![Hazard::Hail, Hazard::Lightning, Hazard::Rain]);
@@ -1233,7 +1245,8 @@ mod tests {
         );
         assert_eq!(
             classify(&CellStats { rotation_ms: Some(45.0), ..base() }),
-            CellThreat::Rotation
+            CellThreat::PossibleRotation,
+            "45 m/s sits inside the two-times-Nyquist fold band, so it is not confirmable"
         );
         assert_eq!(
             classify(&CellStats { rotation_ms: Some(30.0), min_cc: Some(0.7), ..base() }),
