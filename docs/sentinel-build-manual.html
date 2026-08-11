@@ -710,7 +710,31 @@
     </table>
   </div>
 
+  <h4>Tools and consumables</h4>
+  <div class="tbl-scroll">
+    <table>
+      <thead><tr><th>Tool</th><th>Why</th><th>Substitute</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Multimeter</strong></td><td>Continuity and voltage checks before every power-on. The one tool you cannot skip. Every mistake in this build is cheap if you catch it with a meter and expensive if you catch it with smoke.</td><td>None. Buy one.</td></tr>
+        <tr><td><strong>Soldering iron</strong></td><td>Through-hole only: MOSFET legs, resistors, Pico headers, screw terminals. No surface mount anywhere in this build.</td><td>Temperature-controlled preferred, a $15 pencil iron works</td></tr>
+        <tr><td>Solder, 60/40 rosin core</td><td>0.8 mm. Leaded is easier if you can get it; wash your hands.</td><td>Lead-free needs a hotter iron</td></tr>
+        <tr><td><strong>Wire strippers</strong></td><td>22 to 16 AWG range</td><td>A knife will nick strands and cause failures a year later</td></tr>
+        <tr><td>Heat shrink assortment</td><td>Every splice on the 12 V side. Electrical tape unwraps in a hot attic.</td><td>None</td></tr>
+        <tr><td>Hookup wire</td><td>22 AWG stranded for signal, 18 AWG for siren and strobe runs, 16 AWG battery to buck. Get red and black at minimum.</td><td>Solid core cracks with vibration, avoid it</td></tr>
+        <tr><td>Perfboard</td><td>One 5x7 cm piece holds the whole driver board</td><td>A solderless breadboard is fine for bench testing, never for the finished unit</td></tr>
+        <tr><td>Screw terminals</td><td>2-pin 5 mm pitch, five or six. Makes the siren and battery removable without desoldering.</td><td>Direct solder, but you will regret it</td></tr>
+        <tr><td>Ferrules and crimper</td><td>For stranded wire into screw terminals</td><td>Tin the wire ends with solder instead</td></tr>
+        <tr><td>Label maker or tape</td><td>Label both ends of every 12 V wire. In six months you will not remember.</td><td>Masking tape and a pen</td></tr>
+      </tbody>
+    </table>
+  </div>
+
   <div class="col">
+    <div class="warn">
+      <span class="lbl">The rule that prevents every expensive mistake</span>
+      <p><strong>Nothing gets power until the meter says it should.</strong> Each assembly section below ends in a checklist you run with the battery disconnected. Work through it every time, including the times you are sure it is fine. A reversed diode or a 12 V wire in a 3.3 V hole costs you a Pi, and you will not get a warning.</p>
+    </div>
+
     <dl class="kv">
       <dt>MINIMUM</dt><dd>Stages 1&ndash;2 only, reusing a Pi you own: <strong>about $50</strong></dd>
       <dt>RECOMMENDED</dt><dd>Stages 1&ndash;4, the point at which it survives grid and internet loss: <strong>about $310</strong></dd>
@@ -991,7 +1015,58 @@ journalctl -u weatui -f</code></pre>
       <p><strong>Never</strong> connect 12 V to a GPIO pin. The Pi's GPIO is 3.3 V tolerant and will die instantly, possibly taking the SoC with it. <strong>Always</strong> bond the 12 V supply ground to Pi ground; without a common return path the MOSFET gate has no reference and behaves unpredictably. Bench-test the switch with the siren replaced by an LED and series resistor before you connect anything at 12 V.</p>
     </div>
 
-    <h3>2.2 The annunciation script</h3>
+    <h3>2.2 Building the driver board</h3>
+    <p>One 5x7 cm perfboard carries all three output channels. Build one channel completely, test it, then repeat twice. Do not build all three and then test, because if something is wrong you will not know which mistake you made.</p>
+
+    <h4>Identify the parts before you solder anything</h4>
+    <p>Hold the IRLZ44N with the printed face toward you and the legs pointing down. Left to right the pins are <strong>Gate, Drain, Source</strong>. The metal tab at the back is electrically connected to Drain, which matters: if you bolt that tab to a grounded metal enclosure you have shorted your 12 V rail through the siren. Leave the tab unbolted, or use an insulating shoulder washer.</p>
+    <p>On the 1N4007 the <strong>painted band is the cathode</strong>. Diodes fitted backwards is the single most common error in this build, and a backwards flyback diode is a dead short across your 12 V supply the instant you connect the battery.</p>
+
+    <h4>Assembly, one channel</h4>
+    <ol>
+      <li>Solder the MOSFET near one edge of the perfboard, legs through, tab facing outward with clearance around it.</li>
+      <li>Solder a <strong>220 &Omega;</strong> resistor from the Pi GPIO input pad to the <strong>Gate</strong> leg. This limits inrush into the gate capacitance and protects the Pi's output driver.</li>
+      <li>Solder a <strong>10 k&Omega;</strong> resistor from <strong>Gate to Source</strong>. Read the note below before deciding this one is optional. It is not.</li>
+      <li>Fit a 2-pin screw terminal for the siren. Wire one side to <strong>Drain</strong>, the other to the +12 V rail.</li>
+      <li>Solder the <strong>1N4007</strong> across those same two terminal pins, <strong>band toward +12 V</strong>. Physically as close to the terminal as you can get it.</li>
+      <li>Run <strong>Source</strong> to the board's ground rail with 18 AWG.</li>
+      <li>Bring the Pi ground in to that same rail. One ground rail, everything lands on it.</li>
+      <li>Label the terminal. You will have three identical-looking channels in ten minutes.</li>
+    </ol>
+
+    <div class="warn amber">
+      <span class="lbl">Why the 10k pulldown is not optional</span>
+      <p>Pi GPIO pins come up as high-impedance <em>inputs</em> at power-on and stay that way until userspace configures them. That leaves the MOSFET gate floating for the whole boot, and a floating gate drifts. It can partially turn on the MOSFET and sound the siren every time the Pi reboots, during a kernel panic, and while you are trying to debug something at 2am.</p>
+      <p>The 10 k&Omega; resistor holds the gate at 0 V whenever nothing is actively driving it. On a device whose entire job is to be silent until it must not be, this single resistor is doing more work than any other part on the board.</p>
+    </div>
+
+    <h4>Pre-power checklist, battery disconnected</h4>
+    <p>Meter in continuity mode. Every one of these before anything gets connected.</p>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>Probe</th><th>Expect</th><th>If wrong</th></tr></thead>
+        <tbody>
+          <tr><td>+12 V rail to ground rail</td><td><strong>No continuity</strong></td><td>Reversed diode, or a solder bridge. Find it before connecting the battery.</td></tr>
+          <tr><td>Gate to Source</td><td>About 10 k&Omega; in resistance mode</td><td>Missing or unsoldered pulldown</td></tr>
+          <tr><td>GPIO pad to Gate</td><td>About 220 &Omega;</td><td>Wrong resistor or cold joint</td></tr>
+          <tr><td>Drain to Source</td><td>No continuity with gate unpowered</td><td>Blown MOSFET, or the tab is touching something</td></tr>
+          <tr><td>Diode, meter in diode mode, red on band</td><td>No conduction</td><td>Diode is in backwards</td></tr>
+          <tr><td>Diode, red on the non-band side</td><td>Conducts, about 0.6 V</td><td>Dead diode</td></tr>
+          <tr><td>Pi ground to board ground rail</td><td><strong>Continuity</strong></td><td>Missing bond. The gate has no reference and will behave randomly.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h4>Bench test at low voltage, before 12 V and before the Pi</h4>
+    <ol>
+      <li>Put an LED with a 1 k&Omega; series resistor in the siren terminal, and feed the +12 V rail from a bench supply at <strong>5 V</strong>, or from four AA cells. Not 12 V yet.</li>
+      <li>Touch the GPIO pad to 3.3 V by hand. The LED lights.</li>
+      <li>Release it. <strong>The LED goes out on its own.</strong> If it stays lit or fades slowly, your pulldown is not connected.</li>
+      <li>Only now connect it to the Pi and drive it with <code>gpioset</code>.</li>
+      <li>Only after that works, swap the LED for the siren and raise the supply to 12 V. Keep one hand near the disconnect.</li>
+    </ol>
+
+    <h3>2.3 The annunciation script</h3>
     <p>The gate-drive tooling on Pi OS shifted between releases. Confirm what you have before writing the script:</p>
     <pre><code>gpiodetect              # lists chips; note the label for the 40-pin header
 gpioinfo | head -30     # confirms line numbering
@@ -1056,7 +1131,7 @@ case "$1" in
   WATCH)  pattern 200 800 3  ;;
 esac</code></pre>
 
-    <h3>2.3 Acknowledge button</h3>
+    <h3>2.4 Acknowledge button</h3>
     <p>The button must silence the current alert and then re-arm on its own. A safety device that can be permanently muted by a half-asleep hand is worse than no device.</p>
 
     <div class="filename">/usr/local/lib/weatui/ackd.py</div>
@@ -1186,7 +1261,46 @@ with gpiod.Chip(CHIP) as chip:
       <p>Do not build mains-voltage circuits. Use a sealed, listed wall adapter for the charger and keep everything you construct on the DC side.</p>
     </div>
 
-    <h3>3.2 Load shedding</h3>
+    <h3>3.2 Wiring the power path</h3>
+    <p>Build this in the order given. The sequence exists to make sure nothing is ever energised into an unverified load.</p>
+
+    <div class="warn">
+      <span class="lbl">Step one, before anything else</span>
+      <p>Fit the fuse holder to the battery <strong>positive</strong> lead, as close to the terminal as the wire allows. Do this before you strip another wire. A 12 Ah LiFePO4 pack will push hundreds of amps into a shorted screwdriver and set your bench on fire. The fuse is the only thing standing between a slipped probe and an actual emergency.</p>
+    </div>
+
+    <ol>
+      <li><strong>Fuse the battery positive lead.</strong> 16 AWG, blade holder, 5 A fuse. Leave the fuse out of the holder for now so the pack is dead while you work.</li>
+      <li><strong>Set the buck converter with no load attached.</strong> Feed its input from the battery, put your meter on its output, and turn the trim pot until it reads <strong>5.10 V</strong>. A little above 5 V covers cable drop, and the Pi 5 is unforgiving about undervolt.</li>
+      <li><strong>Verify it, then verify it again.</strong> Power cycle the buck and re-measure. Cheap modules ship at arbitrary voltages and some have pots that drift when the screwdriver leaves.</li>
+      <li>Only now wire the buck output to the Pi. 18 AWG, as short as practical.</li>
+      <li>Tap +12 V for the siren board directly off the fused battery line, not off the buck.</li>
+      <li>Wire the INA219 in on the <strong>high side</strong>, between the fuse and everything else, so it sees total current.</li>
+      <li>Bond every ground: battery negative, buck output ground, Pi ground, driver board ground rail. One point, all of them.</li>
+      <li>Insert the fuse. This is your first real power-on.</li>
+    </ol>
+
+    <div class="warn">
+      <span class="lbl">The mistake that kills Raspberry Pis</span>
+      <p>Connecting a Pi to a buck converter whose output you have not measured. Many modules arrive set anywhere from 1 V to their full input voltage. If it happens to be sitting at 12 V, your Pi dies the instant you plug it in, silently and permanently. Measure first, every time, even on a module you set yesterday.</p>
+    </div>
+
+    <h4>Pre-power checklist, fuse removed</h4>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>Probe</th><th>Expect</th></tr></thead>
+        <tbody>
+          <tr><td>Battery + to battery -, through the whole harness</td><td>No continuity</td></tr>
+          <tr><td>Buck output + to buck output -</td><td>No continuity</td></tr>
+          <tr><td>Buck output polarity against the Pi connector</td><td>Positive to positive. Check twice.</td></tr>
+          <tr><td>All four ground points to each other</td><td>Continuity on every pair</td></tr>
+          <tr><td>Buck output, fuse in, no Pi attached</td><td>5.05 to 5.15 V</td></tr>
+          <tr><td>Buck output with the Pi running and the siren sounding</td><td>Stays above 4.9 V. A sag below that is why sirens brown out Pis.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>3.3 Load shedding</h3>
     <p>When mains drops, stop doing expensive things. Radar volumes are 10&ndash;20 MB every few minutes and HRRR GRIB2 decoding is the heaviest workload in the program; both are also the least life-safety-relevant. Your internet is probably down anyway.</p>
 
     <div class="filename">/usr/local/lib/weatui/powerwatch.sh</div>
@@ -1443,9 +1557,36 @@ int main(void) {
     }
 }</code></pre>
 
+    <h3>5.4 Rewiring for the MCU</h3>
+    <p>The driver board does not change. Only what drives its gates changes, moving from Pi GPIO to Pico GP. Both run 3.3 V logic, so there is no level shifter and nothing to translate.</p>
+
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>Signal</th><th>Was</th><th>Becomes</th><th>Note</th></tr></thead>
+        <tbody>
+          <tr><td>Siren gate</td><td>Pi GPIO17, pin 11</td><td><strong>Pico GP2</strong>, pin 4</td><td>Same 220 &Omega; and 10 k&Omega; on the board</td></tr>
+          <tr><td>Strobe gate</td><td>Pi GPIO27, pin 13</td><td><strong>Pico GP3</strong>, pin 5</td><td></td></tr>
+          <tr><td>Ack button</td><td>Pi GPIO23, pin 16</td><td><strong>Pico GP14</strong>, pin 19</td><td>Button to ground, internal pull-up</td></tr>
+          <tr><td>Pi transmit</td><td></td><td>Pi GPIO14 pin 8 to <strong>Pico GP1</strong> pin 2</td><td>TX goes to RX. Crossed, not straight.</td></tr>
+          <tr><td>Pi receive</td><td></td><td>Pi GPIO15 pin 10 to <strong>Pico GP0</strong> pin 1</td><td>RX goes to TX</td></tr>
+          <tr><td>Ground</td><td></td><td>Pico pin 3 to the one ground rail</td><td>Required, or the UART has no reference</td></tr>
+          <tr><td>Pico power</td><td></td><td>3.3 V buck to Pico pin 36 (3V3)</td><td><strong>Not</strong> pin 40 (VBUS) unless you are running it from USB</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <ol>
+      <li>Solder headers to the Pico if it came without them. Seat it in a socket rather than soldering it down, so a dead one swaps out in a minute.</li>
+      <li>Move the three gate wires from the Pi header to the Pico. Leave the driver board alone.</li>
+      <li>Run the two UART wires <strong>crossed</strong>. Transmit on one side goes to receive on the other. Straight-through is the classic mistake here and produces a link that looks wired and does nothing.</li>
+      <li>Bond Pico ground to the same rail as everything else.</li>
+      <li>Free the serial port on the Pi: <code>sudo raspi-config</code>, Interface Options, Serial Port, <strong>no</strong> to the login shell, <strong>yes</strong> to the hardware port. Skip this and the Linux console fights you for the line.</li>
+      <li>Verify before trusting it: <code>screen /dev/serial0 115200</code> and confirm the Pico's once-per-second <code>STAT</code> lines appear.</li>
+    </ol>
+
     <div class="note">
-      <span class="lbl">Wiring change</span>
-      <p>The siren and strobe MOSFET gates move from Pi GPIO17/27 to Pico GP2/GP3. The circuit in Fig. 2 is otherwise unchanged. Bond Pico ground, Pi ground, and 12 V ground together. Cross-connect Pi UART TX (GPIO14, pin 8) to Pico GP1/RX and Pi RX (GPIO15, pin 10) to Pico GP0/TX, and disable the Linux serial console on that port with <code>raspi-config</code> or it will fight you for the line.</p>
+      <span class="lbl">Power the Pico separately</span>
+      <p>Feed the Pico from its own 3.3 V buck off the battery, not from the Pi's 3.3 V pin. If it draws power through the Pi, then the Pi dying takes the Pico with it, and you have rebuilt the exact single point of failure this stage exists to remove.</p>
     </div>
 
     <div class="prove">
@@ -1627,7 +1768,24 @@ i2cdetect -y 1         # BME280 at 0x76/0x77, AS3935 at 0x03</code></pre>
       <p>If you are more than a mile from the nearest siren, expect this stage to detect the monthly test on a calm day and very little else. That is still useful, because the monthly test is what keeps the detector honest, but do not build this expecting a reliable storm-time channel. Never let "no siren heard" suppress or downgrade anything.</p>
     </div>
 
-    <h3>7.5 Signal chain</h3>
+    <h3>7.5 Wiring the microphone</h3>
+    <p>Six wires, no soldering beyond the header. Keep the run under about 30 cm or use shielded cable, because I2S clock lines radiate and pick up noise.</p>
+    <div class="tbl-scroll">
+      <table>
+        <thead><tr><th>SPH0645 pin</th><th>Pi pin</th><th>GPIO</th><th>Note</th></tr></thead>
+        <tbody>
+          <tr><td>3V</td><td class="num">1</td><td>3.3 V</td><td>Not 5 V. This part is 3.3 V only.</td></tr>
+          <tr><td>GND</td><td class="num">9</td><td>Ground</td><td></td></tr>
+          <tr><td>BCLK</td><td class="num">12</td><td>GPIO18</td><td>Bit clock</td></tr>
+          <tr><td>LRCL</td><td class="num">35</td><td>GPIO19</td><td>Word select</td></tr>
+          <tr><td>DOUT</td><td class="num">38</td><td>GPIO20</td><td>Data out of the mic, into the Pi</td></tr>
+          <tr><td><strong>SEL</strong></td><td class="num">9</td><td>Ground</td><td>Ties the mic to the left channel. Leave it floating and you get silence on a mic that looks correctly wired.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Mount it pointing <strong>downward</strong> under an eave or in a vented housing, with the foam windscreen fitted. Rain hitting an upward-facing port sounds exactly like the broadband noise you are trying to detect a tone inside of.</p>
+
+    <h3>7.6 Signal chain</h3>
     <pre><code>sudo apt install -y python3-numpy python3-scipy
 # I2S mic on the Pi: SPH0645 wiring
 #   3V  -> pin 1      GND -> pin 9
@@ -1743,7 +1901,7 @@ exec /usr/local/lib/weatui/annunciate.sh SEVERE "SIREN HEARD, NO ALERT"</code></
       </ol>
     </div>
 
-    <h3>7.6 If you skip this stage</h3>
+    <h3>7.7 If you skip this stage</h3>
     <p>Nothing else depends on it. It is the only stage in this manual whose absence costs you no coverage, because it adds no channel you did not already have. Build it if you want the cross-check and the extra self-test, or if you happen to live within earshot of a pole. Skip it if you do not, and spend the effort on the stage 4 antenna instead, which will do far more for you.</p>
   </div>
 </section>
