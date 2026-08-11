@@ -139,10 +139,22 @@ where
     D: serde::Deserializer<'de>,
 {
     let raw: Vec<serde_json::Value> = Vec::deserialize(d)?;
-    Ok(raw
+    let offered = raw.len();
+    let kept: Vec<Feature> = raw
         .into_iter()
         .filter_map(|v| serde_json::from_value(v).ok())
-        .collect())
+        .collect();
+
+    // Skipping some is a repair; skipping all is a schema change wearing the
+    // costume of a calm day. An empty result from a non-empty body would clear
+    // every active alert and still count as a successful poll, which is the
+    // one failure staleness cannot catch.
+    if offered > 0 && kept.is_empty() {
+        return Err(serde::de::Error::custom(format!(
+            "all {offered} alert features failed to parse; refusing to treat that as an empty sky"
+        )));
+    }
+    Ok(kept)
 }
 
 #[derive(Debug, Clone)]
@@ -173,8 +185,18 @@ impl Alert {
         self.vtec_unparsed
     }
 
+    /// The operative code, which is not always the first one.
+    ///
+    /// An upgrade product carries the CAN for the event it replaces AND the
+    /// NEW for the replacement. Taking `first()` blindly meant that when the
+    /// terminating line came first, the whole alert was read as a cancellation
+    /// and the replacement warning was discarded. A product is only a
+    /// termination when every code in it terminates.
     pub fn primary_vtec(&self) -> Option<&vtec::VtecCode> {
-        self.vtec.first()
+        self.vtec
+            .iter()
+            .find(|v| !v.action.terminates_event())
+            .or_else(|| self.vtec.first())
     }
 
     /// `properties.expires` was parsed for display only, so an alert lingered
@@ -287,6 +309,19 @@ mod tests {
         let parsed: AlertCollection = serde_json::from_str(json).expect("batch must survive");
         assert_eq!(parsed.features.len(), 1, "the bad entry is skipped, not the good one");
         assert_eq!(parsed.features[0].properties.event, "Tornado Warning");
+    }
+
+    #[test]
+    fn a_batch_where_every_feature_fails_is_an_error_not_a_calm_day() {
+        let json = r#"{"features":[{"nonsense":true},{"also":"broken"}]}"#;
+        assert!(
+            serde_json::from_str::<AlertCollection>(json).is_err(),
+            "an all-dropped batch would clear active alerts and still count as a good poll"
+        );
+        assert!(
+            serde_json::from_str::<AlertCollection>(r#"{"features":[]}"#).is_ok(),
+            "a genuinely empty sky is still fine"
+        );
     }
 
     #[test]

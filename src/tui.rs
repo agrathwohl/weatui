@@ -1694,6 +1694,7 @@ mod tests {
                 max_dbz: 50.0,
                 rotation_ms: None,
                 rotation_measurable: true,
+                range_from_site_km: 60.0,
                 min_cc: None,
                 max_vil: None,
                 max_echo_top_km: None,

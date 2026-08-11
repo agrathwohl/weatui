@@ -71,6 +71,10 @@ async fn main() -> Result<()> {
 
     notify::set_hazard_link(home);
 
+    for problem in notify::preflight_scripts(&cfg.alerts.scripts) {
+        eprintln!("weatui: {problem}");
+    }
+
     if cfg.alerts.notify.uses_desktop_daemon() {
         match notify::preflight() {
             Ok(b) if mode == Mode::Daemon => println!("weatui: notifying via {}", b.label()),

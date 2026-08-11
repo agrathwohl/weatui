@@ -150,7 +150,13 @@ impl AlertState {
         before - self.active.len()
     }
 
+    /// A broken clock is refused rather than recorded. Storing the sentinel
+    /// would make the next elapsed calculation zero and disable staleness
+    /// again, which is the failure the sentinel exists to prevent.
     pub fn mark_poll_success(&mut self, now_epoch: u64) {
+        if now_epoch == crate::daemon::CLOCK_BROKEN {
+            return;
+        }
         self.last_success_epoch = Some(now_epoch);
     }
 
@@ -451,6 +457,18 @@ mod tests {
         let far_future = chrono::DateTime::parse_from_rfc3339("2099-01-01T00:00:00Z").unwrap().to_utc();
         assert_eq!(st.prune_expired(far_future), 0);
         assert_eq!(st.active().count(), 1);
+    }
+
+    #[test]
+    fn a_broken_clock_leaves_the_feed_stale_instead_of_disabling_the_check() {
+        let mut st = AlertState::new();
+        st.mark_poll_success(crate::daemon::CLOCK_BROKEN);
+        assert_eq!(
+            st.last_success_epoch(),
+            None,
+            "recording the sentinel would make the next elapsed zero and disable staleness"
+        );
+        assert!(st.is_stale(crate::daemon::CLOCK_BROKEN, 300));
     }
 
     #[test]

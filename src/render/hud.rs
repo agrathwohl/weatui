@@ -11,13 +11,14 @@ use ratatui::widgets::{Block, Borders, Paragraph, Widget, Wrap};
 /// task has stopped, not that the site is between scans.
 const RADAR_STALE_MINUTES: i64 = 15;
 
-/// Height of the 0.5-degree beam centre at a cell's range. Tornadic
-/// circulations are diagnosed below ~1 km AGL, which the beam clears at around
-/// 75 km, so past that the radar is looking over the layer that matters and the
-/// operator needs to know it. Distance is measured from home rather than the
-/// site, so this is an approximation good enough to convey the trend.
-fn beam_height_km_at(range_km: f64) -> Option<f64> {
-    (range_km > 0.0).then(|| crate::radar::fetch::beam_height_km(range_km, 0.5))
+/// Height of the 0.5-degree beam centre above the radar at a cell's range from
+/// the SITE. Tornadic circulations are diagnosed below ~1 km, which the beam
+/// clears around 75 km, so past that the radar is looking over the layer that
+/// matters. Reported as height above the radar, not AGL: terrain between the
+/// site and the cell is not modelled.
+fn beam_height_km_at(range_from_site_km: f64) -> Option<f64> {
+    (range_from_site_km > 0.0)
+        .then(|| crate::radar::fetch::beam_height_km(range_from_site_km, 0.5))
 }
 
 pub fn tier_glyph(event: &str, tier: ThreatTier) -> char {
@@ -44,6 +45,7 @@ pub fn threat_rgb(threat: crate::radar::cells::CellThreat) -> crate::render::col
     match threat {
         CellThreat::Debris => (255, 60, 60),
         CellThreat::Rotation => (255, 130, 40),
+        CellThreat::PossibleRotation => (255, 190, 90),
         CellThreat::Hail => (245, 210, 70),
         CellThreat::Intense => (225, 120, 235),
         CellThreat::Strong => (150, 160, 175),
@@ -100,8 +102,8 @@ fn cells_lines(
                 (None, false) => diag.push("\u{394}v unknown (out of range)".to_string()),
                 (None, true) => {}
             }
-            if let Some(h) = beam_height_km_at(c.distance_km) {
-                diag.push(format!("beam \u{2248}{h:.1} km AGL"));
+            if let Some(h) = beam_height_km_at(c.range_from_site_km) {
+                diag.push(format!("beam \u{2248}{h:.1} km up"));
             }
             if let Some(cc) = c.min_cc {
                 diag.push(format!("cc {cc:.2}"));
@@ -499,6 +501,7 @@ mod tests {
             centroid: crate::geo::Coords { lat: 36.3, lon: -87.0 },
             track_point: crate::geo::Coords { lat: 36.3, lon: -87.0 },
             rotation_measurable: true,
+            range_from_site_km: 120.0,
             max_dbz: 57.0,
             rotation_ms: Some(46.0),
             min_cc: Some(0.78),
@@ -544,6 +547,31 @@ mod tests {
         assert!(near < 0.5, "close in, the beam is in the layer that matters: {near}");
         assert!(far > 2.0, "at 150 km it is well above it: {far}");
         assert!(far > near);
+    }
+
+    #[test]
+    fn beam_height_uses_range_from_the_radar_not_distance_from_home() {
+        use crate::radar::cells::CellThreat;
+        let mut near_home_far_from_radar = cell(CellThreat::Strong);
+        near_home_far_from_radar.distance_km = 10.0;
+        near_home_far_from_radar.range_from_site_km = 150.0;
+
+        let text: String = cells_lines(std::slice::from_ref(&near_home_far_from_radar), Some(0))
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let shown: f64 = text
+            .split("beam \u{2248}")
+            .nth(1)
+            .and_then(|t| t.split(' ').next())
+            .and_then(|t| t.parse().ok())
+            .expect("beam height should render");
+        assert!(
+            shown > 2.0,
+            "a cell 10 km from home but 150 km from the radar is under a high beam, got {shown}"
+        );
     }
 
     #[test]

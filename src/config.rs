@@ -417,6 +417,7 @@ impl Config {
         for (tier, level, script) in [
             ("lethal", self.alerts.notify.lethal, &self.alerts.scripts.lethal),
             ("severe", self.alerts.notify.severe, &self.alerts.scripts.severe),
+            ("watch", self.alerts.notify.watch, &self.alerts.scripts.watch),
         ] {
             if level == Urgency::None && script.is_none() {
                 bail!(

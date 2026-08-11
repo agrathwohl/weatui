@@ -9,14 +9,18 @@ use crate::notify;
 use anyhow::{Context, Result};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// A clock before the epoch is absurd, but falling back to 0 made `is_stale`
-/// compute a zero elapsed time and silently disable staleness detection
-/// entirely. Saturating the other way fails loud instead.
+/// Returned when the system clock is before the epoch. Falling back to 0 made
+/// `is_stale` compute a zero elapsed time and disabled staleness silently;
+/// saturating to this instead is not enough on its own, because storing it as
+/// a success would make elapsed zero again on the next call. `AlertState`
+/// refuses to record it, so the feed stays permanently and loudly stale.
+pub const CLOCK_BROKEN: u64 = u64::MAX;
+
 pub fn now_epoch() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
-        .unwrap_or(u64::MAX)
+        .unwrap_or(CLOCK_BROKEN)
 }
 
 pub struct AlertEngine {

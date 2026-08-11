@@ -113,6 +113,25 @@ pub fn build_args(summary: &str, body: &str, urgency: Urgency) -> Vec<String> {
 
 /// `notify-send` missing is not discoverable at alert time: the first symptom
 /// is a warning that never arrives. Checked once at startup instead.
+/// A script path that is absolute but missing or not executable fails at the
+/// first alert, which is exactly when nobody is reading stderr. Checked at
+/// startup instead, alongside the desktop backend.
+pub fn preflight_scripts(scripts: &Scripts) -> Vec<String> {
+    let mut problems = Vec::new();
+    for path in scripts.all() {
+        match std::fs::metadata(path) {
+            Err(e) => problems.push(format!("alert script {path} is unusable: {e}")),
+            Ok(m) => {
+                use std::os::unix::fs::PermissionsExt;
+                if m.permissions().mode() & 0o111 == 0 {
+                    problems.push(format!("alert script {path} is not executable"));
+                }
+            }
+        }
+    }
+    problems
+}
+
 pub fn preflight() -> Result<Backend> {
     match backend() {
         Backend::None => anyhow::bail!(
@@ -323,8 +342,16 @@ fn run_script(script: &str, n: &Notification, eta_minutes: Option<i64>) -> Resul
         .with_context(|| format!("failed to launch alert script {script}"))?;
     // Reap off-thread: the alert loop must not block on a slow script, and an
     // unwaited child would linger as a zombie.
-    std::thread::spawn(move || {
-        let _ = child.wait();
+    // Detached because the alert loop must not block on a slow script, but the
+    // exit status still has to reach someone: a siren that cannot open the
+    // audio device was previously reported as a successful dispatch.
+    let label = script.to_string();
+    std::thread::spawn(move || match child.wait() {
+        Ok(status) if !status.success() => {
+            eprintln!("weatui: alert script {label} exited with {status}");
+        }
+        Err(e) => eprintln!("weatui: alert script {label} could not be reaped: {e}"),
+        _ => {}
     });
     Ok(())
 }

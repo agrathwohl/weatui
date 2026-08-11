@@ -45,6 +45,9 @@ const TDS_MAX_CC: f32 = 0.85;
 /// right, and the lower bar is the safe one: the sampling lattice is coarser
 /// than the couplet it measures, so every span this reports is biased low.
 const TDS_MIN_ROTATION: f32 = 25.0;
+/// Above plausible Nyquist, so a span this large is not explainable as a
+/// single fold and counts as rotation outright.
+const ROTATION_CONFIRMED_MS: f32 = 40.0;
 const HAIL_VIL: f32 = 45.0;
 /// ~6-7 km at [`STEP_DEG`] spacing: the scale of a couplet plus grid slack.
 const LOCAL_RADIUS_CELLS: i64 = 3;
@@ -106,7 +109,10 @@ pub(crate) fn hazards(
     max_echo_top_km: Option<f32>,
 ) -> Vec<Hazard> {
     let mut out = Vec::new();
-    if matches!(threat, CellThreat::Debris | CellThreat::Rotation) {
+    if matches!(
+        threat,
+        CellThreat::Debris | CellThreat::Rotation | CellThreat::PossibleRotation
+    ) {
         out.push(Hazard::Tornado);
     }
     if threat == CellThreat::Hail {
@@ -127,6 +133,14 @@ pub enum CellThreat {
     Strong,
     Intense,
     Hail,
+    /// An uncorroborated 25-39 m/s span. Reported rather than promoted:
+    /// velocity is not dealiased and WSR-88D Nyquist sits around 25-35 m/s, so
+    /// a lone span in this band is as likely to be a fold artifact as a
+    /// couplet. Silently dropping it hid real low-end mesocyclones; silently
+    /// calling it rotation manufactures tornado claims from aliasing. It gets
+    /// a tornado hazard so it is visible, and its own label so it is not
+    /// mistaken for a confirmed couplet.
+    PossibleRotation,
     Rotation,
     Debris,
 }
@@ -136,6 +150,7 @@ impl CellThreat {
         match self {
             CellThreat::Debris => "debris",
             CellThreat::Rotation => "rotation",
+            CellThreat::PossibleRotation => "maybe rot",
             CellThreat::Hail => "hail",
             CellThreat::Intense => "intense",
             CellThreat::Strong => "strong",
@@ -185,9 +200,14 @@ pub struct StormCell {
     pub track_point: Coords,
     pub max_dbz: f32,
     pub rotation_ms: Option<f32>,
-    /// False when no velocity sample fell inside beam-resolution range, so
-    /// `rotation_ms: None` means unknown rather than calm.
+    /// False when fewer than two distinct velocity samples fell inside
+    /// beam-resolution range, so `rotation_ms: None` means unknown, not calm.
     pub rotation_measurable: bool,
+    /// Range from the RADAR SITE, not from home. Beam height depends on how
+    /// far the pulse travelled, and a cell close to the user can still be far
+    /// from the radar; using the home distance understated the beam height,
+    /// which is the reassuring direction.
+    pub range_from_site_km: f64,
     pub min_cc: Option<f32>,
     pub max_vil: Option<f32>,
     pub max_echo_top_km: Option<f32>,
@@ -215,8 +235,11 @@ pub(crate) fn classify(s: &CellStats) -> CellThreat {
     if rotating && s.min_cc.is_some_and(|cc| cc < TDS_MAX_CC) {
         return CellThreat::Debris;
     }
-    if rotating {
+    if s.rotation_ms.is_some_and(|r| r >= ROTATION_CONFIRMED_MS) {
         return CellThreat::Rotation;
+    }
+    if rotating {
+        return CellThreat::PossibleRotation;
     }
     if s.max_vil.is_some_and(|v| v >= HAIL_VIL)
         || s.max_echo_top_km.is_some_and(|t| t >= HAIL_ECHO_TOP_KM)
@@ -325,10 +348,16 @@ pub fn scan(field: &dyn RadarField, site: Coords, home: Coords) -> Vec<StormCell
             {
                 continue;
             }
-            rotation_measurable = true;
             for dy in -LOCAL_RADIUS_CELLS..=LOCAL_RADIUS_CELLS {
                 for dx in -LOCAL_RADIUS_CELLS..=LOCAL_RADIUS_CELLS {
+                    // A sample compared with itself is a zero span, which made
+                    // shear Some(0) whenever any velocity existed. That reads
+                    // as a measured calm rather than as no measurement.
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
                     let Some(&vb) = velocity.get(&(ix + dx, iy + dy)) else { continue };
+                    rotation_measurable = true;
                     let span = (va - vb).abs();
                     if shear.is_none_or(|m| span > m) {
                         shear = Some(span);
@@ -387,6 +416,7 @@ pub fn scan(field: &dyn RadarField, site: Coords, home: Coords) -> Vec<StormCell
             max_dbz,
             rotation_ms: stats.rotation_ms,
             rotation_measurable,
+            range_from_site_km: crate::geo::haversine_km(site, centroid),
             min_cc: stats.min_cc,
             max_vil: stats.max_vil,
             max_echo_top_km: stats.max_echo_top_km,
@@ -775,6 +805,34 @@ mod tests {
         );
     }
 
+    fn classify_of(c: &StormCell) -> CellThreat {
+        c.threat
+    }
+
+    #[test]
+    fn a_cell_with_no_velocity_product_reports_rotation_as_unknown() {
+        let field = FnField(move |p, product| match product {
+            RadarProduct::Reflectivity => disk(HOME, 8.0, p).then_some(48.0),
+            _ => None,
+        });
+        let c = scan(&field, SITE, HOME).into_iter().next().expect("one cell");
+        assert!(!c.rotation_measurable, "no velocity is not a measurement");
+        assert_eq!(c.rotation_ms, None);
+    }
+
+    #[test]
+    fn a_uniform_velocity_field_is_a_real_zero_shear_measurement() {
+        let field = FnField(move |p, product| match product {
+            RadarProduct::Reflectivity => disk(HOME, 8.0, p).then_some(48.0),
+            RadarProduct::Velocity => disk(HOME, 8.0, p).then_some(3.0),
+            _ => None,
+        });
+        let c = scan(&field, SITE, HOME).into_iter().next().expect("one cell");
+        assert!(c.rotation_measurable, "uniform flow was genuinely measured");
+        assert_eq!(c.rotation_ms, Some(0.0), "and it genuinely has no shear");
+        assert_eq!(classify_of(&c), CellThreat::Strong, "48 dBZ with no shear is a plain strong cell");
+    }
+
     #[test]
     fn a_mesocyclone_below_the_old_bar_still_counts_as_rotation() {
         let base = CellStats {
@@ -789,17 +847,27 @@ mod tests {
             let s = CellStats { rotation_ms: Some(span), ..base.clone() };
             assert_eq!(
                 classify(&s),
-                CellThreat::Rotation,
-                "{span} m/s of shear must not read as a plain intense cell"
+                CellThreat::PossibleRotation,
+                "{span} m/s is reportable but not confirmable on non-dealiased velocity"
             );
             assert!(
                 hazards(classify(&s), None, None).contains(&Hazard::Tornado),
-                "{span} m/s must earn a tornado hazard letter"
+                "{span} m/s must still earn a tornado hazard letter, not vanish"
             );
         }
 
+        let confirmed = CellStats { rotation_ms: Some(45.0), ..base.clone() };
+        assert_eq!(
+            classify(&confirmed),
+            CellThreat::Rotation,
+            "above plausible Nyquist a fold cannot explain it"
+        );
+
         let quiet = CellStats { rotation_ms: Some(20.0), ..base.clone() };
         assert_eq!(classify(&quiet), CellThreat::Intense, "below the bar stays intense");
+
+        assert!(CellThreat::Rotation > CellThreat::PossibleRotation);
+        assert!(CellThreat::PossibleRotation > CellThreat::Hail);
     }
 
     #[test]
@@ -812,8 +880,12 @@ mod tests {
             max_echo_top_km: None,
         };
         let debris = CellStats { min_cc: Some(0.70), ..rotating.clone() };
-        assert_eq!(classify(&rotating), CellThreat::Rotation);
-        assert_eq!(classify(&debris), CellThreat::Debris);
+        assert_eq!(classify(&rotating), CellThreat::PossibleRotation);
+        assert_eq!(
+            classify(&debris),
+            CellThreat::Debris,
+            "a CC collapse corroborates the same span, so it is no longer merely possible"
+        );
         assert!(CellThreat::Debris > CellThreat::Rotation);
     }
 
