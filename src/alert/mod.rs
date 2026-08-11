@@ -73,7 +73,12 @@ pub struct Feature {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AlertCollection {
-    #[serde(default)]
+    /// Required, deliberately. A GeoJSON FeatureCollection always carries
+    /// `features`, empty when there is nothing active. Defaulting it meant a
+    /// 200 with any other shape (schema change, error envelope, captive
+    /// portal) parsed as zero alerts, cleared all active state and counted as
+    /// a successful poll. That is the one failure the staleness backstop
+    /// cannot catch, because nothing failed.
     pub features: Vec<Feature>,
 }
 
@@ -123,9 +128,16 @@ impl Alert {
     }
 
     /// Ray casting against the outer ring. GeoJSON stores `[lon, lat]`.
+    ///
+    /// A null geometry counts as covering the point. Zone-based products carry
+    /// no polygon, and every alert reaching this program came back from a
+    /// `?point=` query, so it covers the queried point by construction. Around
+    /// a quarter of live alerts in the watched tiers have no geometry, all
+    /// severe thunderstorm watches among them; returning `false` labelled them
+    /// as somewhere else, which is the reassuring direction.
     pub fn contains(&self, lat: f64, lon: f64) -> bool {
         let Some(geom) = &self.geometry else {
-            return false;
+            return true;
         };
         geom.outer_rings()
             .into_iter()
@@ -205,12 +217,16 @@ mod tests {
         assert_eq!(alert.primary_vtec().unwrap().phenomenon_significance(), "SV.W");
     }
 
+    /// Zone-based products carry no polygon and reach this program only via a
+    /// `?point=` query, so they cover the user by construction. Treating them
+    /// as covering nothing denied the [YOU] marker to every severe
+    /// thunderstorm watch in the live feed.
     #[test]
-    fn alert_without_geometry_contains_nothing() {
+    fn a_zone_based_alert_with_no_polygon_still_covers_the_user() {
         let json = r#"{"features":[{"geometry":null,"properties":{"event":"X","parameters":{}}}]}"#;
         let parsed: AlertCollection = serde_json::from_str(json).unwrap();
         let alert = Alert::from_feature(parsed.features.into_iter().next().unwrap());
-        assert!(!alert.contains(35.5, -97.5));
+        assert!(alert.contains(35.5, -97.5));
     }
 
     #[test]

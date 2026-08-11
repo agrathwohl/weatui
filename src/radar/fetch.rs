@@ -304,9 +304,28 @@ pub async fn latest_scan(site: &str) -> Result<Scan> {
     assemble_volume(chunks).map_err(|e| anyhow!("failed to assemble the volume for {site}: {e}"))
 }
 
+/// A volume whose age cannot be established is refused rather than stamped
+/// with the wall clock. Stamping it `now` fabricates freshness for data of
+/// unknown age, defeats every staleness indicator downstream, and corrupts the
+/// ring, which orders and deduplicates on `captured_at`. A dropped frame is
+/// visible; a frame lying about its age is not.
+fn observation_time(
+    stamped: Option<DateTime<Utc>>,
+    from_scan: Option<DateTime<Utc>>,
+    what: &str,
+) -> Result<DateTime<Utc>> {
+    stamped
+        .or(from_scan)
+        .ok_or_else(|| anyhow!("{what} carries no observation time; refusing to date it as now"))
+}
+
 pub async fn latest_field(site: &str) -> Result<(DateTime<Utc>, NexradField)> {
     let scan = latest_scan(site).await?;
-    let observed = scan.time_range().map(|(start, _)| start).unwrap_or_else(Utc::now);
+    let observed = observation_time(
+        None,
+        scan.time_range().map(|(start, _)| start),
+        &format!("the latest volume for {site}"),
+    )?;
     Ok((observed, NexradField::from_scan(&scan)?))
 }
 
@@ -354,9 +373,11 @@ pub async fn archived_field(id: Identifier) -> Result<(DateTime<Utc>, NexradFiel
         .scan()
         .map_err(|e| anyhow!("failed to decode {name}: {e}"))?;
 
-    let observed = stamped
-        .or_else(|| scan.time_range().map(|(start, _)| start))
-        .unwrap_or_else(Utc::now);
+    let observed = observation_time(
+        stamped,
+        scan.time_range().map(|(start, _)| start),
+        &format!("archive volume {name}"),
+    )?;
     Ok((observed, NexradField::from_scan(&scan)?))
 }
 
@@ -364,6 +385,20 @@ pub async fn archived_field(id: Identifier) -> Result<(DateTime<Utc>, NexradFiel
 mod tests {
     use super::*;
     use crate::radar::grid::{Viewport, rasterize};
+
+    #[test]
+    fn a_volume_with_no_time_is_refused_rather_than_dated_now() {
+        let err = observation_time(None, None, "test volume").unwrap_err();
+        assert!(err.to_string().contains("no observation time"), "got: {err}");
+    }
+
+    #[test]
+    fn the_archive_stamp_wins_over_the_scan_time_range() {
+        let stamped = DateTime::parse_from_rfc3339("2026-07-27T07:00:00Z").unwrap().to_utc();
+        let scanned = DateTime::parse_from_rfc3339("2026-07-27T09:00:00Z").unwrap().to_utc();
+        assert_eq!(observation_time(Some(stamped), Some(scanned), "v").unwrap(), stamped);
+        assert_eq!(observation_time(None, Some(scanned), "v").unwrap(), scanned);
+    }
 
     /// Hits the live NOAA S3 bucket, so it is excluded from the default run.
     /// `cargo test -- --ignored --nocapture`

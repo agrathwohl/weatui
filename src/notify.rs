@@ -176,6 +176,40 @@ pub fn dispatch(
 
 /// A dead poller is indistinguishable from calm weather, so it is announced at
 /// critical urgency regardless of configured tier levels.
+/// Sent once when polling resumes after a gap. The gap itself is the message:
+/// nothing in this program can reconstruct which warnings were live while it
+/// was not looking, so the user has to be told the window existed.
+pub fn send_gap_recovery(gap_secs: u64, scripts: &Scripts) -> Result<()> {
+    let minutes = gap_secs / 60;
+    let n = Notification {
+        key: "weatui.feed.recovered".to_string(),
+        tier: ThreatTier::Severe,
+        event: "ALERT FEED RESUMED".to_string(),
+        headline: Some(format!("Polling resumed after a {minutes} min gap.")),
+        area: None,
+        instruction: Some(
+            "You were not being warned during that window. Check for active warnings."
+                .to_string(),
+        ),
+        damage_threat: None,
+        tornado_detection: None,
+    };
+    let notified = run(&build_args(
+        "[weatui] ALERT FEED RESUMED",
+        &body_for(&n, None),
+        Urgency::Critical,
+    ));
+    let scripted = match scripts.for_tier(ThreatTier::Lethal) {
+        Some(script) => run_script(script, &n, None),
+        None => Ok(()),
+    };
+    match (notified, scripted) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(a), Err(b)) => Err(anyhow::anyhow!("{a:#}; {b:#}")),
+        (Err(e), Ok(())) | (Ok(()), Err(e)) => Err(e),
+    }
+}
+
 pub fn stale_notification(elapsed_secs: u64) -> Notification {
     let minutes = elapsed_secs / 60;
     Notification {

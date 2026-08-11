@@ -921,6 +921,12 @@ pub async fn run(cfg: Config, home: Coords) -> Result<()> {
                     dispatch_error = Some(format!("{e:#}"));
                 }
             }
+            if let Some(gap) = tick.recovered_after_gap_secs
+                && let Err(e) = notify::send_gap_recovery(gap, &notify_scripts)
+            {
+                dispatch_error = Some(format!("{e:#}"));
+            }
+
             if tick.went_stale
                 && let Err(e) =
                     notify::send_stale_warning(engine.stale_elapsed(), &notify_scripts)

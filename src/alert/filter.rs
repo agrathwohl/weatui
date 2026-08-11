@@ -44,24 +44,40 @@ impl Filter {
         }
     }
 
+    fn tier_of(&self, key: &str) -> Option<ThreatTier> {
+        if self.lethal.contains(key) {
+            return Some(ThreatTier::Lethal);
+        }
+        if self.severe.contains(key) {
+            return Some(ThreatTier::Severe);
+        }
+        if self.watch.contains(key) {
+            return Some(ThreatTier::Watch);
+        }
+        None
+    }
+
     /// `None` means "not worth waking someone up for". Unknown products reject
     /// by default: this is an allowlist, never a blocklist.
+    ///
+    /// A tier entry is either a P-VTEC `PH.S` code or a literal event name, so
+    /// the same list covers both the coded products and the civil-emergency
+    /// messages that carry no VTEC at all. The event-name pass also runs for
+    /// VTEC-bearing alerts: previously a `return None` inside the VTEC branch
+    /// made every escape hatch unreachable for exactly the coded products a
+    /// user would most want to add.
     pub fn classify(&self, alert: &Alert) -> Option<ThreatTier> {
         if let Some(vtec) = alert.primary_vtec() {
             if !vtec.is_operational() {
                 return None;
             }
-            let key = vtec.phenomenon_significance();
-            if self.lethal.contains(&key) {
-                return Some(ThreatTier::Lethal);
+            if let Some(tier) = self.tier_of(&vtec.phenomenon_significance()) {
+                return Some(tier);
             }
-            if self.severe.contains(&key) {
-                return Some(ThreatTier::Severe);
-            }
-            if self.watch.contains(&key) {
-                return Some(ThreatTier::Watch);
-            }
-            return None;
+        }
+
+        if let Some(tier) = self.tier_of(&alert.properties.event) {
+            return Some(tier);
         }
 
         if self.extra_events.contains(&alert.properties.event) {
@@ -145,10 +161,9 @@ mod tests {
     }
 
     #[test]
-    fn heat_and_marine_products_are_rejected() {
+    fn marine_and_advisory_products_are_rejected() {
         for (event, vtec) in [
             ("Heat Advisory", "/O.NEW.KOUN.HT.Y.0004.260727T1500Z-260728T0000Z/"),
-            ("Extreme Heat Warning", "/O.NEW.KOUN.EH.W.0002.260727T1500Z-260728T0000Z/"),
             ("Gale Warning", "/O.NEW.KBOX.GL.W.0011.260727T0700Z-260727T1900Z/"),
             ("Rip Current Statement", "/O.NEW.KBOX.RP.S.0009.260727T0700Z-260727T1900Z/"),
             ("Beach Hazards Statement", "/O.NEW.KBOX.BH.S.0002.260727T0700Z-260727T1900Z/"),
@@ -156,6 +171,55 @@ mod tests {
             let a = alert_with(event, Some(vtec));
             assert_eq!(filter().classify(&a), None, "{event} should be rejected");
         }
+    }
+
+    /// Heat kills more people in most US years than any other weather hazard,
+    /// so it is alerted despite this being a radar tool. Both the current
+    /// `XH.W` and the retired `EH.W` are covered because feeds carry both.
+    #[test]
+    fn extreme_heat_is_alerted_under_both_the_current_and_retired_code() {
+        for vtec in [
+            "/O.NEW.KOUN.XH.W.0002.260727T1500Z-260728T0000Z/",
+            "/O.NEW.KOUN.EH.W.0002.260727T1500Z-260728T0000Z/",
+        ] {
+            let a = alert_with("Extreme Heat Warning", Some(vtec));
+            assert_eq!(filter().classify(&a), Some(ThreatTier::Severe), "{vtec}");
+        }
+    }
+
+    #[test]
+    fn drowning_class_products_are_not_silently_discarded() {
+        for (event, vtec, tier) in [
+            ("Tsunami Warning", "/O.NEW.PAAQ.TS.W.0001.260727T0700Z-260727T1900Z/", ThreatTier::Lethal),
+            ("Storm Surge Warning", "/O.NEW.KMFL.SS.W.0003.260727T0700Z-260727T1900Z/", ThreatTier::Lethal),
+            ("Hurricane Warning", "/O.NEW.KMFL.HU.W.0002.260727T0700Z-260727T1900Z/", ThreatTier::Lethal),
+            ("Flood Warning", "/O.NEW.KOHX.FL.W.0016.260727T0700Z-260727T1900Z/", ThreatTier::Severe),
+            ("Flood Warning", "/O.NEW.KLWX.FA.W.0016.260727T0700Z-260727T1900Z/", ThreatTier::Severe),
+        ] {
+            let a = alert_with(event, Some(vtec));
+            assert_eq!(filter().classify(&a), Some(tier), "{event} {vtec}");
+        }
+    }
+
+    #[test]
+    fn a_civil_emergency_without_any_vtec_still_classifies() {
+        let a = alert_with("Evacuation Immediate", None);
+        assert_eq!(filter().classify(&a), Some(ThreatTier::Lethal));
+    }
+
+    #[test]
+    fn a_vtec_product_in_no_tier_can_be_rescued_by_name() {
+        let gale = "/O.NEW.KBOX.GL.W.0011.260727T0700Z-260727T1900Z/";
+        assert_eq!(filter().classify(&alert_with("Gale Warning", Some(gale))), None);
+
+        let mut alerts = Alerts::default();
+        alerts.extra_events.push("Gale Warning".to_string());
+        let rescued = Filter::from_config(&alerts);
+        assert_eq!(
+            rescued.classify(&alert_with("Gale Warning", Some(gale))),
+            Some(ThreatTier::Severe),
+            "extra_events must reach a product that carries a VTEC"
+        );
     }
 
     #[test]

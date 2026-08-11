@@ -53,6 +53,13 @@ pub struct Poller {
     base_interval_secs: u64,
     server_max_age: Option<u64>,
     consecutive_failures: u32,
+    retry_after: Option<u64>,
+}
+
+/// Only the delta-seconds form. The HTTP-date form is legal but api.weather.gov
+/// does not use it, and guessing wrong is worse than falling back to backoff.
+pub fn parse_retry_after(raw: &str) -> Option<u64> {
+    raw.trim().parse::<u64>().ok()
 }
 
 impl Poller {
@@ -69,6 +76,7 @@ impl Poller {
             base_interval_secs,
             server_max_age: None,
             consecutive_failures: 0,
+            retry_after: None,
         })
     }
 
@@ -80,10 +88,12 @@ impl Poller {
     /// configured interval, and back off after failures.
     pub fn next_delay(&self) -> Duration {
         if self.consecutive_failures > 0 {
-            return Duration::from_secs(backoff_secs(
-                self.consecutive_failures,
-                self.base_interval_secs,
-            ));
+            let backoff = backoff_secs(self.consecutive_failures, self.base_interval_secs);
+            let wait = match self.retry_after {
+                Some(asked) => asked.max(backoff).min(MAX_BACKOFF_SECS),
+                None => backoff,
+            };
+            return Duration::from_secs(wait);
         }
         let secs = self
             .server_max_age
@@ -108,6 +118,11 @@ impl Poller {
 
         if resp.status() == StatusCode::TOO_MANY_REQUESTS {
             self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+            self.retry_after = resp
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(parse_retry_after);
             anyhow::bail!("api.weather.gov rate limited the request");
         }
 
@@ -116,8 +131,6 @@ impl Poller {
             return Err(e).context("alert request returned an error status");
         }
 
-        self.consecutive_failures = 0;
-
         self.server_max_age = resp
             .headers()
             .get(header::CACHE_CONTROL)
@@ -125,6 +138,8 @@ impl Poller {
             .and_then(parse_max_age);
 
         if resp.status() == StatusCode::NOT_MODIFIED {
+            self.consecutive_failures = 0;
+            self.retry_after = None;
             return Ok(PollOutcome::Unchanged);
         }
 
@@ -134,10 +149,16 @@ impl Poller {
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
 
-        let body: AlertCollection = resp
-            .json()
-            .await
-            .context("alert response was not the expected GeoJSON")?;
+        let body: AlertCollection = match resp.json().await {
+            Ok(b) => b,
+            Err(e) => {
+                self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+                return Err(e).context("alert response was not the expected GeoJSON");
+            }
+        };
+
+        self.consecutive_failures = 0;
+        self.retry_after = None;
 
         self.etag = new_etag;
         Ok(PollOutcome::Updated(
@@ -192,6 +213,34 @@ mod tests {
         let mut p = Poller::new(Coords { lat: 35.0, lon: -97.0 }, 10).unwrap();
         p.server_max_age = Some(4);
         assert_eq!(p.next_delay(), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn retry_after_is_honoured_when_the_server_asks_for_longer() {
+        assert_eq!(parse_retry_after("120"), Some(120));
+        assert_eq!(parse_retry_after(" 30 "), Some(30));
+        assert_eq!(parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT"), None);
+
+        let mut p = Poller::new(Coords { lat: 35.0, lon: -97.0 }, 5).unwrap();
+        p.consecutive_failures = 1;
+        p.retry_after = Some(120);
+        assert_eq!(p.next_delay(), Duration::from_secs(120), "server wins when it asks for longer");
+
+        p.retry_after = Some(1);
+        assert_eq!(
+            p.next_delay(),
+            Duration::from_secs(10),
+            "backoff wins when the server asks for less than we already back off"
+        );
+    }
+
+    #[test]
+    fn a_body_with_no_features_key_is_an_error_not_an_empty_sky() {
+        assert!(
+            serde_json::from_str::<AlertCollection>(r#"{"status":502}"#).is_err(),
+            "a 200 with a different shape must not read as zero active alerts"
+        );
+        assert!(serde_json::from_str::<AlertCollection>(r#"{"features":[]}"#).is_ok());
     }
 
     #[test]

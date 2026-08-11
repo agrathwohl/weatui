@@ -19,6 +19,7 @@ pub fn config_path() -> Result<PathBuf> {
 
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     /// Defaulted so an omitted section reaches `validate` and gets the
     /// actionable message, rather than serde's bare "missing field".
@@ -33,6 +34,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Location {
     pub zip: Option<String>,
     pub lat: Option<f64>,
@@ -51,6 +53,7 @@ impl Location {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Alerts {
     #[serde(default = "default_poll_interval")]
     pub poll_interval_secs: u64,
@@ -75,6 +78,7 @@ pub struct Alerts {
 /// in addition to the desktop notification, or instead of it when the
 /// tier's `[alerts.notify]` level is set to `"none"`.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Scripts {
     pub lethal: Option<String>,
     pub severe: Option<String>,
@@ -97,6 +101,7 @@ impl Scripts {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Tiers {
     #[serde(default = "default_lethal")]
     pub lethal: Vec<String>,
@@ -129,6 +134,7 @@ impl Urgency {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NotifyLevels {
     #[serde(default = "default_critical")]
     pub lethal: Urgency,
@@ -139,6 +145,7 @@ pub struct NotifyLevels {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Radar {
     /// `"auto"` selects the nearest WSR-88D, otherwise an ICAO site id.
     #[serde(default = "default_site")]
@@ -158,6 +165,7 @@ pub enum Colormap {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Render {
     #[serde(default = "default_colormap")]
     pub colormap: Colormap,
@@ -188,14 +196,44 @@ fn default_stale_after() -> u64 {
 fn default_extra_events() -> Vec<String> {
     vec!["Special Weather Statement".to_string()]
 }
+/// Entries are P-VTEC `PH.S` codes, or literal event names for the
+/// civil-emergency products that carry no VTEC.
+///
+/// Convective coverage alone left tsunami, storm surge, hurricane and the
+/// evacuation-class civil messages silently discarded. `XH.W` is the current
+/// extreme-heat code and `EH.W` its retired predecessor; both are listed
+/// because feeds still carry the old one. Marine products stay out: this is an
+/// inland radar tool and a rip current statement is not what it is for.
 fn default_lethal() -> Vec<String> {
-    ["TO.W", "EW.W", "FF.W"].iter().map(|s| s.to_string()).collect()
+    [
+        "TO.W", "EW.W", "FF.W", "TS.W", "SS.W", "HU.W",
+        "Civil Danger Warning",
+        "Evacuation Immediate",
+        "Hazardous Materials Warning",
+        "Radiological Hazard Warning",
+        "Nuclear Power Plant Warning",
+        "Shelter In Place Warning",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 fn default_severe() -> Vec<String> {
-    ["SV.W", "SQ.W", "DS.W"].iter().map(|s| s.to_string()).collect()
+    [
+        "SV.W", "SQ.W", "DS.W", "TR.W", "FA.W", "FL.W", "BZ.W", "IS.W", "WS.W", "XH.W", "EH.W",
+        "HW.W", "CF.W", "AV.W",
+        "Civil Emergency Message",
+        "Law Enforcement Warning",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 fn default_watch() -> Vec<String> {
-    ["TO.A", "SV.A"].iter().map(|s| s.to_string()).collect()
+    ["TO.A", "SV.A", "HU.A", "TR.A", "SS.A", "TS.A", "FF.A", "BZ.A", "WS.A", "XH.A"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 fn default_critical() -> Urgency {
     Urgency::Critical
@@ -347,6 +385,35 @@ impl Config {
         if self.radar.frames == 0 {
             bail!("{path}: radar.frames must be greater than zero");
         }
+        if self.radar.refresh_secs == 0 {
+            bail!("{path}: radar.refresh_secs must be greater than zero");
+        }
+        if self.alerts.stale_after_secs == 0 {
+            bail!(
+                "{path}: alerts.stale_after_secs must be greater than zero; \
+                 zero would report the feed stale on every poll"
+            );
+        }
+        if self.alerts.tiers.lethal.is_empty() {
+            bail!(
+                "{path}: [alerts.tiers] lethal is empty, so no product can raise a lethal \
+                 alert. Each tier list REPLACES the default rather than adding to it, so \
+                 listing only new codes silently drops the built-ins. Include TO.W and the \
+                 others you want alongside anything you are adding"
+            );
+        }
+        for (tier, level, script) in [
+            ("lethal", self.alerts.notify.lethal, &self.alerts.scripts.lethal),
+            ("severe", self.alerts.notify.severe, &self.alerts.scripts.severe),
+        ] {
+            if level == Urgency::None && script.is_none() {
+                bail!(
+                    "{path}: [alerts.notify] {tier} = \"none\" with no [alerts.scripts] \
+                     {tier} entry silences that tier completely. Set a script, or raise \
+                     the level"
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -467,6 +534,72 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("poll_interval_secs"));
+    }
+
+    fn err_for(toml: &str) -> String {
+        format!(
+            "{:#}",
+            Config::parse(toml, "/home/x/config.toml").expect_err("should be rejected")
+        )
+    }
+
+    #[test]
+    fn a_typo_in_a_key_is_rejected_rather_than_silently_defaulted() {
+        let err = err_for("[location]\nzip = \"73019\"\n\n[alerts]\nstale_after_sec = 900\n");
+        assert!(err.contains("stale_after_sec"), "got: {err}");
+    }
+
+    #[test]
+    fn a_typo_in_a_section_is_rejected_rather_than_silently_defaulted() {
+        let err = err_for("[location]\nzip = \"73019\"\n\n[alerts.notifiy]\nlethal = \"none\"\n");
+        assert!(err.contains("notifiy"), "got: {err}");
+    }
+
+    #[test]
+    fn an_empty_lethal_tier_is_rejected_because_tiers_replace_the_defaults() {
+        let err = err_for("[location]\nzip = \"73019\"\n\n[alerts.tiers]\nlethal = []\n");
+        assert!(err.contains("lethal is empty"), "got: {err}");
+        assert!(err.contains("REPLACES"), "the message must warn about replace-not-merge: {err}");
+    }
+
+    #[test]
+    fn silencing_the_lethal_tier_without_a_script_is_rejected() {
+        let err = err_for("[location]\nzip = \"73019\"\n\n[alerts.notify]\nlethal = \"none\"\n");
+        assert!(err.contains("silences that tier completely"), "got: {err}");
+    }
+
+    #[test]
+    fn silencing_the_lethal_tier_is_allowed_when_a_script_replaces_it() {
+        Config::parse(
+            "[location]\nzip = \"73019\"\n\n[alerts.notify]\nlethal = \"none\"\n\n\
+             [alerts.scripts]\nlethal = \"/usr/local/bin/siren.sh\"\n",
+            "/home/x/config.toml",
+        )
+        .expect("a script is a valid replacement for the desktop daemon");
+    }
+
+    #[test]
+    fn zero_timeouts_that_would_disable_a_safety_check_are_rejected() {
+        assert!(
+            err_for("[location]\nzip = \"73019\"\n\n[alerts]\nstale_after_secs = 0\n")
+                .contains("stale_after_secs")
+        );
+        assert!(
+            err_for("[location]\nzip = \"73019\"\n\n[radar]\nrefresh_secs = 0\n")
+                .contains("refresh_secs")
+        );
+    }
+
+    #[test]
+    fn tsunami_and_civil_emergency_products_are_in_the_shipped_defaults() {
+        let cfg = Config::parse("[location]\nzip = \"73019\"\n", "/tmp/c.toml").unwrap();
+        for code in ["TO.W", "TS.W", "SS.W", "HU.W"] {
+            assert!(cfg.alerts.tiers.lethal.iter().any(|c| c == code), "missing {code}");
+        }
+        assert!(
+            cfg.alerts.tiers.lethal.iter().any(|c| c == "Evacuation Immediate"),
+            "civil-emergency products carry no VTEC and must be listed by name"
+        );
     }
 
     #[test]
