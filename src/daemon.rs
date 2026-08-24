@@ -174,9 +174,21 @@ impl AlertEngine {
     }
 }
 
+/// The TUI's conditions task refreshes every 5 minutes for the HUD; the
+/// daemon only needs the forecast often enough to notice rain a day out.
+const RAIN_POLL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
 pub async fn run(cfg: Config, home: Coords, echo_to_stdout: bool) -> Result<()> {
     let site = resolve_site(&cfg, home)?;
     let mut engine = AlertEngine::new(&cfg, home)?;
+    let client = reqwest::Client::builder()
+        .user_agent(crate::alert::poll::USER_AGENT)
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .context("HTTP client for the rain forecast could not be built")?;
+    let mut rain_watch = crate::conditions::RainWatch::default();
+    let mut points: Option<crate::conditions::PointsUrls> = None;
+    let mut next_rain_poll = std::time::Instant::now();
     if echo_to_stdout {
         println!(
             "weatui monitoring {:.4},{:.4} (radar {}) via {}",
@@ -231,6 +243,41 @@ pub async fn run(cfg: Config, home: Coords, echo_to_stdout: bool) -> Result<()> 
             && echo_to_stdout {
                 eprintln!("weatui: poll failed: {err}");
             }
+
+        if std::time::Instant::now() >= next_rain_poll {
+            next_rain_poll = std::time::Instant::now() + RAIN_POLL;
+            if points.is_none() {
+                match crate::conditions::points_urls(&client, home).await {
+                    Ok(p) => points = Some(p),
+                    Err(e) => eprintln!("weatui: forecast discovery failed: {e:#}"),
+                }
+            }
+            if let Some(p) = &points {
+                match crate::conditions::hourly_forecast(&client, &p.forecast_hourly).await {
+                    Ok(hours) => {
+                        let now = chrono::Utc::now();
+                        if let Some(h) = rain_watch.check(&hours, now) {
+                            let away = (h.valid - now).num_hours();
+                            if echo_to_stdout {
+                                println!(
+                                    "weatui: rain expected in ~{away}h ({}% chance)",
+                                    h.precip_chance_pct.unwrap_or(f32::NAN)
+                                );
+                            }
+                            if let Err(e) = notify::send_rain_notice(
+                                away,
+                                h.precip_chance_pct,
+                                h.short.as_deref(),
+                                &cfg.alerts.notify,
+                            ) {
+                                eprintln!("weatui: rain notice failed: {e:#}");
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("weatui: hourly forecast fetch failed: {e:#}"),
+                }
+            }
+        }
 
         tokio::time::sleep(engine.next_delay()).await;
     }

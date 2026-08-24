@@ -454,6 +454,33 @@ pub fn send_gap_recovery(gap_secs: u64, levels: &NotifyLevels, scripts: &Scripts
     }
 }
 
+/// Advance notice of forecast rain, not a warning: normal urgency, desktop
+/// only, no per-tier script.
+pub fn send_rain_notice(
+    hours_away: i64,
+    chance_pct: Option<f32>,
+    short: Option<&str>,
+    levels: &NotifyLevels,
+) -> Result<()> {
+    if !levels.uses_desktop_daemon() {
+        return Ok(());
+    }
+    let when = if hours_away <= 1 {
+        "within the hour".to_string()
+    } else {
+        format!("in about {hours_away} hours")
+    };
+    let chance = match chance_pct {
+        Some(p) => format!("{p:.0}% chance of precipitation."),
+        None => "Precipitation is in the forecast.".to_string(),
+    };
+    let body = match short {
+        Some(s) => format!("{s}. {chance}"),
+        None => chance,
+    };
+    run(&format!("[weatui] Rain expected {when}"), &body, Urgency::Normal)
+}
+
 /// System notices are pinned to critical rather than following a tier, but
 /// they must still respect a config that has no desktop daemon at all. On
 /// macOS every tier is silenced and alerts go out through scripts, so calling

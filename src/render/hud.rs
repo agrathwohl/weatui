@@ -736,6 +736,7 @@ mod tests {
             wind_mph: None,
             wind_dir: None,
             short: Some("Chance Showers".into()),
+            precip_chance_pct: None,
         };
         let active: Vec<ActiveAlert> = Vec::new();
         let eta = |_: &crate::alert::Alert| None;
@@ -783,6 +784,7 @@ mod tests {
             wind_mph: Some(8.0),
             wind_dir: Some("WSW".into()),
             short: Some("Chance Showers".into()),
+            precip_chance_pct: None,
         };
         let fc = crate::conditions::FrameConditions::Forecast(&h);
         let text: Vec<String> = frame_conditions_lines(at, &fc, chrono_tz::America::Chicago, (32.0, 95.0))

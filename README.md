@@ -200,6 +200,9 @@ example mako's `[urgency=critical]` section):
   independent.
 - If no poll of api.weather.gov has succeeded for `stale_after_secs`, a
   critical **ALERT FEED STALE** notification fires.
+- When the hourly forecast first shows rain likely (≥ 50% chance) within
+  the next 24 hours, a normal-urgency **Rain expected** notice fires — once
+  per rain event, not once per poll.
 
 Only life-safety products are alerted: tornado, extreme wind, flash flood,
 severe thunderstorm, squall and dust storm warnings, tornado and severe

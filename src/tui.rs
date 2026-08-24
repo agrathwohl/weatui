@@ -245,6 +245,8 @@ pub struct App {
     conditions: Option<crate::conditions::Conditions>,
     obs_history: Vec<crate::conditions::Conditions>,
     hourly: Vec<crate::conditions::HourlyForecast>,
+    rain_watch: crate::conditions::RainWatch,
+    rain_levels: crate::config::NotifyLevels,
     cells: Vec<crate::radar::cells::StormCell>,
     /// Track id, not a list index: the ranking is rebuilt every volume, so an
     /// index would silently slide onto a different storm.
@@ -378,6 +380,8 @@ impl App {
             conditions: None,
             obs_history: Vec::new(),
             hourly: Vec::new(),
+            rain_watch: crate::conditions::RainWatch::default(),
+            rain_levels: cfg.alerts.notify.clone(),
             cells: Vec::new(),
             selected: None,
             locked_on: None,
@@ -1346,6 +1350,17 @@ async fn event_loop(
                     }
                     if !u.hourly.is_empty() {
                         app.hourly = u.hourly;
+                        let now = chrono::Utc::now();
+                        if let Some(h) = app.rain_watch.check(&app.hourly, now)
+                            && let Err(e) = notify::send_rain_notice(
+                                (h.valid - now).num_hours(),
+                                h.precip_chance_pct,
+                                h.short.as_deref(),
+                                &app.rain_levels,
+                            )
+                        {
+                            app.status = format!("rain notice failed: {e:#}");
+                        }
                     }
                     if let Some(e) = u.error {
                         app.status = format!("conditions unavailable: {e}");
@@ -1741,6 +1756,7 @@ mod tests {
             wind_mph: None,
             wind_dir: None,
             short: Some("Sunny".into()),
+            precip_chance_pct: None,
         }];
         let mut past_obs = crate::conditions::Conditions {
             station: "KM02".into(),

@@ -227,6 +227,7 @@ pub struct HourlyForecast {
     pub wind_mph: Option<f32>,
     pub wind_dir: Option<String>,
     pub short: Option<String>,
+    pub precip_chance_pct: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -255,6 +256,8 @@ struct Period {
     wind_direction: Option<String>,
     #[serde(rename = "shortForecast")]
     short_forecast: Option<String>,
+    #[serde(rename = "probabilityOfPrecipitation", default)]
+    precip: Option<Quantity>,
 }
 
 fn hourly_from(p: Period) -> Option<HourlyForecast> {
@@ -274,7 +277,46 @@ fn hourly_from(p: Period) -> Option<HourlyForecast> {
             .and_then(|n| n.parse().ok()),
         wind_dir: p.wind_direction.filter(|d| !d.is_empty()),
         short: p.short_forecast.filter(|d| !d.is_empty()),
+        precip_chance_pct: p.precip.unwrap_or_default().percent(),
     })
+}
+
+/// A chance at or above this is treated as "it is going to rain".
+pub const RAIN_ALERT_MIN_CHANCE_PCT: f32 = 50.0;
+const RAIN_LOOKAHEAD_HOURS: i64 = 24;
+/// Onsets closer together than this belong to the same rain event.
+const RAIN_EVENT_GAP_HOURS: i64 = 6;
+
+/// First forecast hour in the next 24 whose rain chance reaches the threshold.
+pub fn rain_ahead(list: &[HourlyForecast], now: DateTime<Utc>) -> Option<&HourlyForecast> {
+    list.iter()
+        .filter(|h| h.valid > now && (h.valid - now).num_hours() < RAIN_LOOKAHEAD_HOURS)
+        .filter(|h| h.precip_chance_pct.is_some_and(|p| p >= RAIN_ALERT_MIN_CHANCE_PCT))
+        .min_by_key(|h| h.valid)
+}
+
+/// One notice per rain event, not one per poll. The onset drifts as forecasts
+/// refresh and rolls hour-by-hour through a long rainy spell; both are still
+/// the same event and stay silent. Only an onset jumping more than
+/// [`RAIN_EVENT_GAP_HOURS`] past the last noticed one is new rain.
+#[derive(Default)]
+pub struct RainWatch {
+    noticed_onset: Option<DateTime<Utc>>,
+}
+
+impl RainWatch {
+    pub fn check<'a>(
+        &mut self,
+        list: &'a [HourlyForecast],
+        now: DateTime<Utc>,
+    ) -> Option<&'a HourlyForecast> {
+        let onset = rain_ahead(list, now)?;
+        let fresh = self
+            .noticed_onset
+            .is_none_or(|prev| onset.valid - prev > chrono::Duration::hours(RAIN_EVENT_GAP_HOURS));
+        self.noticed_onset = Some(onset.valid);
+        fresh.then_some(onset)
+    }
 }
 
 pub async fn hourly_forecast(
@@ -464,7 +506,8 @@ mod tests {
             {"startTime":"2026-08-02T00:00:00-05:00","temperature":69,"temperatureUnit":"F",
              "dewpoint":{"unitCode":"wmoUnit:degC","value":20.0},
              "relativeHumidity":{"unitCode":"wmoUnit:percent","value":100},
-             "windSpeed":"5 to 10 mph","windDirection":"WSW","shortForecast":"Partly Cloudy"},
+             "windSpeed":"5 to 10 mph","windDirection":"WSW","shortForecast":"Partly Cloudy",
+             "probabilityOfPrecipitation":{"unitCode":"wmoUnit:percent","value":80}},
             {"startTime":"2026-08-02T01:00:00-05:00","temperature":20,"temperatureUnit":"C",
              "windSpeed":null,"windDirection":"","shortForecast":""}
         ]}}"#;
@@ -481,6 +524,76 @@ mod tests {
         assert_eq!(hours[1].temp_f, Some(68.0), "celsius must convert");
         assert_eq!(hours[1].wind_mph, None);
         assert_eq!(hours[1].short, None, "an empty forecast string is not a forecast");
+        assert_eq!(hours[0].precip_chance_pct, Some(80.0));
+        assert_eq!(hours[1].precip_chance_pct, None, "absent PoP stays unknown, not zero");
+    }
+
+    #[test]
+    fn rain_ahead_finds_the_first_likely_hour_within_a_day() {
+        let now = DateTime::parse_from_rfc3339("2026-08-02T06:00:00Z").unwrap().to_utc();
+        let hour = |off_h: i64, chance: Option<f32>| HourlyForecast {
+            valid: now + chrono::Duration::hours(off_h),
+            temp_f: None,
+            dewpoint_f: None,
+            humidity_pct: None,
+            wind_mph: None,
+            wind_dir: None,
+            short: None,
+            precip_chance_pct: chance,
+        };
+
+        assert!(rain_ahead(&[hour(3, Some(30.0))], now).is_none(), "30% is not rain");
+        assert!(rain_ahead(&[hour(-2, Some(90.0))], now).is_none(), "past hours do not count");
+        assert!(rain_ahead(&[hour(30, Some(90.0))], now).is_none(), "beyond 24h is out of scope");
+        let list = [hour(9, Some(70.0)), hour(4, Some(55.0)), hour(2, Some(10.0))];
+        assert_eq!(
+            rain_ahead(&list, now).unwrap().valid,
+            now + chrono::Duration::hours(4),
+            "the earliest qualifying hour is the onset"
+        );
+    }
+
+    #[test]
+    fn rain_watch_notices_once_per_event_and_again_for_distant_new_rain() {
+        let now = DateTime::parse_from_rfc3339("2026-08-02T06:00:00Z").unwrap().to_utc();
+        let rain_at = |t: DateTime<Utc>| HourlyForecast {
+            valid: t,
+            temp_f: None,
+            dewpoint_f: None,
+            humidity_pct: None,
+            wind_mph: None,
+            wind_dir: None,
+            short: None,
+            precip_chance_pct: Some(80.0),
+        };
+        let mut watch = RainWatch::default();
+        let onset = now + chrono::Duration::hours(5);
+
+        assert!(watch.check(&[rain_at(onset)], now).is_some(), "first sighting notifies");
+        assert!(
+            watch.check(&[rain_at(onset)], now + chrono::Duration::minutes(5)).is_none(),
+            "the next poll of the same forecast stays silent"
+        );
+        assert!(
+            watch.check(&[rain_at(onset + chrono::Duration::hours(1))], now).is_none(),
+            "an onset drifting an hour is the same event"
+        );
+
+        let mut long_rain = watch.noticed_onset.unwrap();
+        for _ in 0..12 {
+            long_rain += chrono::Duration::hours(1);
+            assert!(
+                watch.check(&[rain_at(long_rain)], long_rain - chrono::Duration::hours(1))
+                    .is_none(),
+                "rolling hour-by-hour through a rainy spell never re-notifies"
+            );
+        }
+
+        let later = long_rain + chrono::Duration::hours(20);
+        assert!(
+            watch.check(&[rain_at(later + chrono::Duration::hours(8))], later).is_some(),
+            "rain returning much later is a new event"
+        );
     }
 
     #[test]
@@ -494,6 +607,7 @@ mod tests {
             wind_mph: None,
             wind_dir: None,
             short: None,
+            precip_chance_pct: None,
         };
         let list = [hour(0), hour(60)];
         let at = |off: i64| base + chrono::Duration::minutes(off);

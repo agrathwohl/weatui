@@ -18,8 +18,8 @@
     "runtime": null
   },
   "build": {
-    "buildCommand": "cargo build",
-    "testCommand": "cargo test",
+    "buildCommand": "nix develop --command bash -c 'cargo test 2>&1 | grep -E \"^error(\\[|:)|^test result|panicked|-->\" -A4 | head -25; echo CLIPPY:; cargo clippy --all-targets 2>&1 | grep -cE \"^(warning|error)\"; cargo build --release 2>&1 | grep -E \"^error\"; echo RELEASE-OK'",
+    "testCommand": "nix develop --command bash -c 'cargo test live_conditions -- --ignored --nocapture 2>&1 | tail -12'",
     "lintCommand": "cargo clippy",
     "devCommand": "cargo run",
     "scripts": {}
@@ -111,14 +111,20 @@
   "hotPaths": [
     {
       "path": "src/tui.rs",
-      "accessCount": 29,
-      "lastAccessed": 1785739013733,
+      "accessCount": 42,
+      "lastAccessed": 1787606958253,
       "type": "file"
     },
     {
       "path": "src/radar/fetch.rs",
       "accessCount": 13,
       "lastAccessed": 1785645006222,
+      "type": "file"
+    },
+    {
+      "path": "src/conditions.rs",
+      "accessCount": 11,
+      "lastAccessed": 1787606840328,
       "type": "file"
     },
     {
@@ -134,21 +140,21 @@
       "type": "file"
     },
     {
+      "path": "src/render/hud.rs",
+      "accessCount": 5,
+      "lastAccessed": 1787606789217,
+      "type": "file"
+    },
+    {
+      "path": "src/daemon.rs",
+      "accessCount": 5,
+      "lastAccessed": 1787606821070,
+      "type": "file"
+    },
+    {
       "path": "src/radar/hrrr.rs",
       "accessCount": 4,
       "lastAccessed": 1785397332400,
-      "type": "file"
-    },
-    {
-      "path": "src/conditions.rs",
-      "accessCount": 4,
-      "lastAccessed": 1785572013568,
-      "type": "file"
-    },
-    {
-      "path": "src/render/hud.rs",
-      "accessCount": 4,
-      "lastAccessed": 1785645115300,
       "type": "file"
     },
     {
@@ -158,9 +164,15 @@
       "type": "file"
     },
     {
+      "path": "src/notify.rs",
+      "accessCount": 4,
+      "lastAccessed": 1787606775023,
+      "type": "file"
+    },
+    {
       "path": "README.md",
-      "accessCount": 3,
-      "lastAccessed": 1785623724063,
+      "accessCount": 4,
+      "lastAccessed": 1787607030578,
       "type": "file"
     },
     {
@@ -182,21 +194,9 @@
       "type": "file"
     },
     {
-      "path": "src/notify.rs",
-      "accessCount": 2,
-      "lastAccessed": 1785646112988,
-      "type": "file"
-    },
-    {
       "path": "src/config.rs",
       "accessCount": 2,
       "lastAccessed": 1785646126712,
-      "type": "file"
-    },
-    {
-      "path": "src/daemon.rs",
-      "accessCount": 2,
-      "lastAccessed": 1785646127063,
       "type": "file"
     },
     {
